@@ -17,6 +17,7 @@ const {
 const { version: APP_VERSION } = require("./package.json");
 const { sitePassword, sitePasswordEnabled } = require("./siteAuth");
 const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
+const { createPoolAddon } = require("./providerPool");
 const LRUCache = require("./lruCache");
 
 const DEBUG = (process.env.DEBUG_MODE || "").toLowerCase() === "true";
@@ -45,6 +46,40 @@ const PREFETCH_MAX_BYTES = parseInt(
 );
 const PREFETCH_ENABLED =
   (process.env.PREFETCH_ENABLED || "true").toLowerCase() !== "false";
+
+const POOL_KEY = process.env.POOL_KEY || "";
+const POOL_FILE = process.env.POOL_FILE || path.join(__dirname, "providers.json");
+const POOL_ENABLED = /^[A-Za-z0-9_-]{16,}$/.test(POOL_KEY);
+if (POOL_KEY && !POOL_ENABLED)
+  console.warn("[POOL] Disabled: POOL_KEY must be at least 16 letters, digits, - or _");
+
+let poolPromise = null;
+function poolInterface() {
+  if (!poolPromise) {
+    poolPromise = createPoolAddon(POOL_FILE).catch((e) => {
+      poolPromise = null;
+      throw e;
+    });
+  }
+  return poolPromise;
+}
+
+function isPoolToken(token) {
+  return token.startsWith("pool-");
+}
+
+function poolKeyMatches(token) {
+  if (!POOL_ENABLED) return false;
+  const given = crypto.createHash("sha256").update(token.slice(5)).digest();
+  const expected = crypto.createHash("sha256").update(POOL_KEY).digest();
+  return crypto.timingSafeEqual(given, expected);
+}
+
+function setPublicBase(req, iface, token) {
+  if (typeof iface.setPublicBase !== "function") return;
+  const proto = (req.get("x-forwarded-proto") || req.protocol).split(",")[0];
+  iface.setPublicBase(`${proto}://${req.get("host")}/${token}`);
+}
 
 const app = express();
 const staticDir = path.join(__dirname, "src");
@@ -310,6 +345,18 @@ app.get("/:token/configure-xtream", (req, res) => {
 // Token interface middleware
 app.use("/:token", async (req, res, next) => {
   const { token } = req.params;
+  if (isPoolToken(token)) {
+    if (!poolKeyMatches(token)) return res.status(404).json({ error: "Not found" });
+    try {
+      req.addonInterface = await poolInterface();
+    } catch (e) {
+      console.error("[POOL] Build failed:", e.message);
+      return res.status(500).json({ error: "Pool build error" });
+    }
+    req.configToken = token;
+    setPublicBase(req, req.addonInterface, token);
+    return next();
+  }
   if (!isConfigToken(token)) return next("route");
   if (req.path.startsWith("/configure")) return next();
 
@@ -343,10 +390,7 @@ app.use("/:token", async (req, res, next) => {
 
   req.addonInterface = iface;
   req.configToken = token;
-  if (typeof iface.setPublicBase === "function") {
-    const proto = (req.get("x-forwarded-proto") || req.protocol).split(",")[0];
-    iface.setPublicBase(`${proto}://${req.get("host")}/${token}`);
-  }
+  setPublicBase(req, iface, token);
   dlog("Request", req.method, req.originalUrl);
   next();
 });
@@ -430,7 +474,7 @@ app.get("/:token/manifest.json", (req, res) => {
   manifest.logo = `${proto}://${req.get("host")}/img/icon.png`;
   if (manifest.behaviorHints) {
     delete manifest.behaviorHints.configurationRequired;
-    manifest.behaviorHints.configurable = true;
+    manifest.behaviorHints.configurable = !iface.isPool;
   }
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -466,4 +510,6 @@ app.listen(port, () => {
   console.log(
     `🚀 Server running on port ${port} (debug=${DEBUG}, prefetch=${PREFETCH_ENABLED})`,
   );
+  if (POOL_ENABLED)
+    poolInterface().catch((e) => console.error("[POOL] Build failed:", e.message));
 });

@@ -313,6 +313,67 @@ The addon itself (`/<token>/manifest.json`, catalogs, streams, logos), `/health`
 
 ---
 
+## 🧺 Provider Pool (several providers, one install)
+
+If you pay for more than one provider, the server can load all of them and serve them as one addon. The logins stay in a file on the server instead of in the install link.
+
+- Every row (channels, groups, Catch-up TV, movies, series) lists items from all providers. Each stream is labeled with the provider it comes from.
+- **Live Now** and **Today** are built from all providers together, so a game on several providers is one tile with each provider's channels. Up to 25 streams are listed per event, taken from each provider in turn.
+- Each provider is fetched, cached and refreshed on its own. If one is down, the others keep working and the failed one is retried every 10 minutes.
+- The same channel from two providers still shows up twice in the channel rows. Merging duplicates is planned.
+
+### Set it up
+
+Create `providers.json` next to your compose file and `chmod 600` it:
+
+```json
+{
+  "settings": {
+    "epgTimezone": "America/New_York",
+    "liveOnly": false,
+    "catchup": true,
+    "hideAdult": true
+  },
+  "providers": [
+    { "id": "a", "name": "Main", "provider": "xtream", "xtreamUrl": "http://panel.example.com:80", "xtreamUsername": "user", "xtreamPassword": "pass" },
+    { "id": "b", "name": "Backup", "provider": "direct", "m3uUrl": "https://example.com/playlist.m3u", "epgUrl": "https://example.com/guide.xml" }
+  ]
+}
+```
+
+- `id`: 1-8 lowercase letters or digits. It becomes part of every item ID, so don't change it later or Stremio loses saved items from that provider.
+- `name`: shown on that provider's streams.
+- `settings` apply to every provider. A provider can override any of them, along with its own guide fields (`epgUrl`, `epgOffsetHours`, `epgLocalTimes`, `enableEpg`).
+- Xtream providers take `xtreamUrl`, `xtreamUsername`, `xtreamPassword` and optionally `xtreamUseM3U` and `xtreamOutput`. Direct providers take `m3uUrl` and optionally `epgUrl`. The guide is on by default.
+
+Mount the file read-only and add a key to `iptv.env`:
+
+```yaml
+  iptv:
+    build: ./addons/iptv
+    restart: unless-stopped
+    env_file: ./iptv.env
+    volumes:
+      - ./providers.json:/config/providers.json:ro
+```
+
+```
+POOL_KEY=<openssl rand -hex 24>
+POOL_FILE=/config/providers.json
+```
+
+Restart with `docker compose up -d iptv`, then install:
+
+```
+https://yourname.duckdns.org/pool-<POOL_KEY>/manifest.json
+```
+
+The key is the only thing protecting your provider logins, so treat that link like a password. A wrong key gets a 404. The pool has its own addon ID, so it can be installed next to a regular install. It has no Configure page: edit `providers.json` and run `docker compose restart iptv` instead. `providers.json` is listed in `.gitignore` and `.dockerignore`, so it can't end up in the repo or the image.
+
+**Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB. Providers with large movie and series libraries add more.
+
+---
+
 ## 🔐 Configuration Tokens
 
 | Type | Format | Notes |
@@ -395,6 +456,8 @@ curl -X POST http://localhost:7000/api/prefetch \
 | `EPG_REFRESH_MS` | `3600000` (1h) | How often the guide is re-downloaded (channels refresh hourly) |
 | `MAX_CACHE_ENTRIES` | `300` | LRU entry cap |
 | `CONFIG_SECRET` | unset | 16+ chars. Config UI encrypts install links with it (AES-256-GCM) |
+| `POOL_KEY` | unset | 16+ letters, digits, `-` or `_`. Turns on the [provider pool](#-provider-pool-several-providers-one-install), installed at `/pool-<POOL_KEY>/manifest.json` |
+| `POOL_FILE` | `./providers.json` | Path to the pool's provider list |
 | `DEBUG_MODE` | `false` | Enables verbose diagnostic logs |
 | `PREFETCH_ENABLED` | `true` | Enable server-side prefetch CORS bypass |
 | `PREFETCH_MAX_BYTES` | `5000000` | Max bytes returned from `/api/prefetch` |

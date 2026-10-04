@@ -345,6 +345,10 @@ class M3UEPGAddon {
         return g ? String(g).trim() : '';
     }
 
+    epgIdOf(item) {
+        return item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'] || null;
+    }
+
     buildGroupCatalogs(tvCatalog) {
         const catalogs = this.manifestRef.catalogs;
         for (let i = catalogs.length - 1; i >= 0; i--) {
@@ -404,7 +408,7 @@ class M3UEPGAddon {
                 now,
                 groupOf: c => this.channelGroup(c),
                 epgData: this.epgData,
-                epgIdOf: c => c.attributes?.['tvg-id'] || c.attributes?.['tvg-name'] || null,
+                epgIdOf: c => this.epgIdOf(c),
                 schedule: schedule.games
             });
             this.eventIndexFor = this.channels;
@@ -500,7 +504,7 @@ class M3UEPGAddon {
         if (!e) return null;
         const meta = this.eventMetaPreview(e);
         const shown = this.eventChannels(e);
-        meta.description += '\n\n' + shown.map(c => `• ${c.slot}`).join('\n');
+        meta.description += '\n\n' + shown.map(c => `• ${this.eventChannelLabel(c)}`).join('\n');
         if (shown.length < e.channels.length) meta.description += `\n…and ${e.channels.length - shown.length} more`;
         return meta;
     }
@@ -511,9 +515,17 @@ class M3UEPGAddon {
         const streams = [];
         for (const ch of this.eventChannels(e)) {
             const stream = this.getStream(ch.id);
-            if (stream) streams.push({ ...stream, name: ch.source, title: ch.slot });
+            if (stream) streams.push({ ...stream, name: this.eventStreamName(ch, stream), title: ch.slot });
         }
         return streams;
+    }
+
+    eventStreamName(ch) {
+        return ch.source;
+    }
+
+    eventChannelLabel(ch) {
+        return ch.slot;
     }
 
     buildGenresInManifest() {
@@ -914,7 +926,7 @@ class M3UEPGAddon {
     generateMetaPreview(item) {
         const meta = { id: item.id, type: item.type, name: item.name };
         if (item.type === 'tv') {
-            const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
+            const epgId = this.epgIdOf(item);
             const current = this.getCurrentProgram(epgId);
             meta.description = current
                 ? `📡 Now: ${current.title}${current.description ? `\n${current.description}` : ''}`
@@ -1088,7 +1100,7 @@ class M3UEPGAddon {
         const item = all.find(i => i.id === id);
         if (!item) return null;
         if (item.type === 'tv') {
-            const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
+            const epgId = this.epgIdOf(item);
             const current = this.getCurrentProgram(epgId);
             const upcoming = this.getUpcomingPrograms(epgId, 3);
             let description = `📺 CHANNEL: ${item.name}`;
@@ -1141,12 +1153,12 @@ class M3UEPGAddon {
     }
 }
 
-async function createAddon(config) {
+function baseManifest(config, { id = ADDON_ID, name = ADDON_NAME, description, configurable = true } = {}) {
     const manifest = {
-        id: ADDON_ID,
+        id,
         version: ADDON_VERSION,
-        name: ADDON_NAME,
-        description: "Live TV, movies and series from an M3U playlist or Xtream Codes panel, with XMLTV guide info.",
+        name,
+        description: description || "Live TV, movies and series from an M3U playlist or Xtream Codes panel, with XMLTV guide info.",
         resources: ["catalog", "stream", "meta"],
         types: ["tv", "movie", "series"],
         catalogs: [
@@ -1174,7 +1186,7 @@ async function createAddon(config) {
         ],
         idPrefixes: ["iptv_"],
         behaviorHints: {
-            configurable: true,
+            configurable,
             configurationRequired: false
         }
     };
@@ -1183,6 +1195,26 @@ async function createAddon(config) {
         manifest.types = ["tv"];
         manifest.catalogs = manifest.catalogs.filter(c => c.type === 'tv');
     }
+    return manifest;
+}
+
+async function initialLoad(addonInstance) {
+    await addonInstance.loadFromCache();
+    try {
+        const hasData = addonInstance.channels.length || addonInstance.movies.length || addonInstance.series.length;
+        const stale = addonInstance.needsRefresh();
+        if (!hasData) {
+            await addonInstance.updateData(true);
+        } else if (stale) {
+            addonInstance.updateData(true).catch(() => { });
+        }
+    } catch (e) {
+        console.error('[ADDON] Initial update failed:', e);
+    }
+}
+
+async function createAddon(config) {
+    const manifest = baseManifest(config);
 
     config.instanceId = config.instanceId ||
         (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(8).toString('hex'));
@@ -1202,208 +1234,200 @@ async function createAddon(config) {
 
     const buildPromise = (async () => {
         const addonInstance = new M3UEPGAddon(config, manifest);
-        await addonInstance.loadFromCache();
-        try {
-            const hasData = addonInstance.channels.length || addonInstance.movies.length || addonInstance.series.length;
-            const stale = addonInstance.needsRefresh();
-            if (!hasData) {
-                await addonInstance.updateData(true);
-            } else if (stale) {
-                addonInstance.updateData(true).catch(() => { });
-            }
-        } catch (e) {
-            console.error('[ADDON] Initial update failed:', e);
-        }
-        
-        const builder = new addonBuilder(manifest);
-
-        builder.defineCatalogHandler(async (args) => {
-            const start = Date.now();
-            try {
-                // Background update
-                addonInstance.updateData().catch(() => { });
-
-                if (args.type === 'tv' && (args.id === 'iptv_live_now' || args.id === 'iptv_today')) {
-                    const extra = args.extra || {};
-                    const now = Date.now();
-                    const q = extra.search ? extra.search.toLowerCase() : '';
-                    const opts = { genre: extra.genre || null, includeAssumed: !!q };
-                    const index = addonInstance.liveEventIndex();
-                    let events = args.id === 'iptv_today'
-                        ? todayEvents(index, now, { ...opts, zone: addonInstance.timezone || 'America/New_York' })
-                        : currentEvents(index, now, opts);
-                    if (q) events = events.filter(e => e.title.toLowerCase().includes(q));
-                    const skip = extra.skip ? parseInt(extra.skip) : 0;
-                    const metas = events.slice(skip, skip + 100).map(e => addonInstance.eventMetaPreview(e, now));
-                    return { metas, cacheMaxAge: LIVE_NOW_CACHE_S };
-                }
-
-                let items = [];
-                if (args.type === 'tv' && args.id === 'iptv_channels') {
-                    items = addonInstance.channels;
-                } else if (args.type === 'tv' && args.id === 'iptv_catchup') {
-                    items = addonInstance.channels.filter(c => addonInstance.catchupEnabledFor(c));
-                } else if (args.type === 'tv' && args.id.startsWith('iptv_grp_')) {
-                    const group = addonInstance.groupCatalogMap?.get(args.id);
-                    if (group) items = addonInstance.channels.filter(c => addonInstance.channelGroup(c) === group);
-                } else if (args.type === 'movie' && args.id === 'iptv_movies') {
-                    items = addonInstance.movies;
-                } else if (args.type === 'series' && args.id === 'iptv_series') {
-                    if (addonInstance.config.includeSeries !== false)
-                        items = addonInstance.series;
-                }
-
-                const extra = args.extra || {}; // Stremio passes filter/genre here
-                let filtered = items;
-                
-                // If specific genre selected
-                if (extra.genre && extra.genre !== 'All Channels') {
-                    filtered = filtered.filter(i => {
-                        const cat = i.category || i.attributes?.['group-title'];
-                        return cat === extra.genre;
-                    });
-                }
-                
-                // If searching
-                if (extra.search) {
-                    const q = extra.search.toLowerCase();
-                    filtered = filtered.filter(i => i.name.toLowerCase().includes(q));
-                }
-                
-                // Pagination / Skip
-                const skip = extra.skip ? parseInt(extra.skip) : 0;
-                const metas = filtered.slice(skip, skip + 100).map(i => addonInstance.generateMetaPreview(i));
-                
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Catalog handler', {
-                        type: args.type,
-                        id: args.id,
-                        genre: extra.genre,
-                        totalItems: items.length,
-                        filtered: filtered.length,
-                        returned: metas.length,
-                        skip,
-                        ms: Date.now() - start
-                    });
-                }
-                return { metas };
-            } catch (e) {
-                console.error('[CATALOG] Error', e);
-                return { metas: [] };
-            }
-        });
-
-        builder.defineStreamHandler(async ({ type, id }) => {
-            try {
-                if (id.startsWith('iptv_ev_')) {
-                    return { streams: addonInstance.getEventStreams(id) };
-                }
-                if (id.startsWith('iptv_series_ep_')) {
-                    const stream = addonInstance.getStream(id);
-                    if (!stream) return { streams: [] };
-                    if (addonInstance.config.debug) {
-                        console.log('[DEBUG] Series Episode Stream request', { id, url: stream.url });
-                    }
-                    return { streams: [stream] };
-                }
-                const stream = addonInstance.getStream(id);
-                if (!stream) return { streams: [] };
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Stream request', { id, url: stream.url });
-                }
-                const catchup = type === 'tv' ? await addonInstance.getCatchupStreams(id) : [];
-                return { streams: [stream, ...catchup] };
-            } catch (e) {
-                console.error('[STREAM] Error', e);
-                return { streams: [] };
-            }
-        });
-
-        builder.defineMetaHandler(async ({ type, id }) => {
-            try {
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Meta handler called', { type, id, seriesCount: addonInstance.series.length });
-                }
-                if (id.startsWith('iptv_ev_')) {
-                    return { meta: addonInstance.getEventMeta(id) };
-                }
-                if (type === 'series' || id.startsWith('iptv_series_')) {
-                    const meta = await addonInstance.getDetailedMetaAsync(id, 'series');
-                    if (addonInstance.config.debug) {
-                        console.log('[DEBUG] Series meta result', { id, found: !!meta, videos: meta?.videos?.length });
-                    }
-                    if (!meta) {
-                        // Fallback: Try to find in series list and return basic meta without episodes
-                        const seriesItem = addonInstance.series.find(s => s.id === id);
-                        if (seriesItem) {
-                            const fallbackMeta = {
-                                id: seriesItem.id,
-                                type: 'series',
-                                name: seriesItem.name,
-                                poster: seriesItem.poster || seriesItem.attributes?.['tvg-logo'] ||
-                                    `https://placehold.co/300x450/3366CC/FFFFFF/png?text=${encodeURIComponent(seriesItem.name)}`,
-                                description: seriesItem.plot || seriesItem.attributes?.['plot'] || 'Series / Show',
-                                genres: seriesItem.category
-                                    ? [seriesItem.category]
-                                    : (seriesItem.attributes?.['group-title'] ? [seriesItem.attributes['group-title']] : ['Series']),
-                                videos: []
-                            };
-                            if (addonInstance.config.debug) {
-                                console.log('[DEBUG] Series meta fallback used', { id, name: seriesItem.name });
-                            }
-                            return { meta: fallbackMeta };
-                        }
-                    }
-                    return { meta: meta || null };
-                }
-                const meta = addonInstance.getDetailedMeta(id);
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Meta request', { id, type, found: !!meta });
-                }
-                return { meta };
-            } catch (e) {
-                console.error('[META] Error', e);
-                return { meta: null };
-            }
-        });
-
-        const iface = builder.getInterface();
-        iface.setPublicBase = base => { addonInstance.publicBase = base; };
-        iface.renderEventCard = id => addonInstance.renderEventCard(id);
-        iface.eventCardFallback = id => {
-            const e = addonInstance.liveEventIndex().get(id);
-            return e ? eventCardUrl(e) : null;
-        };
-        addonInstance.manifestReady = true;
-        addonInstance.buildGenresInManifest();
-
-        // POST-BUILD: Inject 'options' into each catalog's genre extra entry.
-        // This MUST happen after getInterface() because the SDK linter would reject
-        // the large options arrays during build. The manifest object is shared by
-        // reference, so mutating it here affects the iface.manifest served by our
-        // custom manifest.json route in server.js.
-        for (const catalog of manifest.catalogs) {
-            if (Array.isArray(catalog.genres) && catalog.genres.length > 0) {
-                if (Array.isArray(catalog.extra)) {
-                    const genreExtra = catalog.extra.find(e => e.name === 'genre');
-                    if (genreExtra) {
-                        genreExtra.options = [...catalog.genres];
-                    }
-                }
-            }
-        }
-
-        return iface;
+        await initialLoad(addonInstance);
+        return buildInterface(addonInstance, manifest);
     })();
 
     if (CACHE_ENABLED) buildPromiseCache.set(cacheKey, buildPromise);
-    try {
-        const iface = await buildPromise;
-        return iface;
-    } finally {
-        // Keep promise cached
+    return buildPromise;
+}
+
+function buildInterface(addonInstance, manifest) {
+    const builder = new addonBuilder(manifest);
+
+    builder.defineCatalogHandler(async (args) => {
+        const start = Date.now();
+        try {
+            // Background update
+            addonInstance.updateData().catch(() => { });
+
+            if (args.type === 'tv' && (args.id === 'iptv_live_now' || args.id === 'iptv_today')) {
+                const extra = args.extra || {};
+                const now = Date.now();
+                const q = extra.search ? extra.search.toLowerCase() : '';
+                const opts = { genre: extra.genre || null, includeAssumed: !!q };
+                const index = addonInstance.liveEventIndex();
+                let events = args.id === 'iptv_today'
+                    ? todayEvents(index, now, { ...opts, zone: addonInstance.timezone || 'America/New_York' })
+                    : currentEvents(index, now, opts);
+                if (q) events = events.filter(e => e.title.toLowerCase().includes(q));
+                const skip = extra.skip ? parseInt(extra.skip) : 0;
+                const metas = events.slice(skip, skip + 100).map(e => addonInstance.eventMetaPreview(e, now));
+                return { metas, cacheMaxAge: LIVE_NOW_CACHE_S };
+            }
+
+            let items = [];
+            if (args.type === 'tv' && args.id === 'iptv_channels') {
+                items = addonInstance.channels;
+            } else if (args.type === 'tv' && args.id === 'iptv_catchup') {
+                items = addonInstance.channels.filter(c => addonInstance.catchupEnabledFor(c));
+            } else if (args.type === 'tv' && args.id.startsWith('iptv_grp_')) {
+                const group = addonInstance.groupCatalogMap?.get(args.id);
+                if (group) items = addonInstance.channels.filter(c => addonInstance.channelGroup(c) === group);
+            } else if (args.type === 'movie' && args.id === 'iptv_movies') {
+                items = addonInstance.movies;
+            } else if (args.type === 'series' && args.id === 'iptv_series') {
+                if (addonInstance.config.includeSeries !== false)
+                    items = addonInstance.series;
+            }
+
+            const extra = args.extra || {}; // Stremio passes filter/genre here
+            let filtered = items;
+            
+            // If specific genre selected
+            if (extra.genre && extra.genre !== 'All Channels') {
+                filtered = filtered.filter(i => {
+                    const cat = i.category || i.attributes?.['group-title'];
+                    return cat === extra.genre;
+                });
+            }
+            
+            // If searching
+            if (extra.search) {
+                const q = extra.search.toLowerCase();
+                filtered = filtered.filter(i => i.name.toLowerCase().includes(q));
+            }
+            
+            // Pagination / Skip
+            const skip = extra.skip ? parseInt(extra.skip) : 0;
+            const metas = filtered.slice(skip, skip + 100).map(i => addonInstance.generateMetaPreview(i));
+            
+            if (addonInstance.config.debug) {
+                console.log('[DEBUG] Catalog handler', {
+                    type: args.type,
+                    id: args.id,
+                    genre: extra.genre,
+                    totalItems: items.length,
+                    filtered: filtered.length,
+                    returned: metas.length,
+                    skip,
+                    ms: Date.now() - start
+                });
+            }
+            return { metas };
+        } catch (e) {
+            console.error('[CATALOG] Error', e);
+            return { metas: [] };
+        }
+    });
+
+    builder.defineStreamHandler(async ({ type, id }) => {
+        try {
+            if (id.startsWith('iptv_ev_')) {
+                return { streams: addonInstance.getEventStreams(id) };
+            }
+            if (id.startsWith('iptv_series_ep_')) {
+                const stream = addonInstance.getStream(id);
+                if (!stream) return { streams: [] };
+                if (addonInstance.config.debug) {
+                    console.log('[DEBUG] Series Episode Stream request', { id, url: stream.url });
+                }
+                return { streams: [stream] };
+            }
+            const stream = addonInstance.getStream(id);
+            if (!stream) return { streams: [] };
+            if (addonInstance.config.debug) {
+                console.log('[DEBUG] Stream request', { id, url: stream.url });
+            }
+            const catchup = type === 'tv' ? await addonInstance.getCatchupStreams(id) : [];
+            return { streams: [stream, ...catchup] };
+        } catch (e) {
+            console.error('[STREAM] Error', e);
+            return { streams: [] };
+        }
+    });
+
+    builder.defineMetaHandler(async ({ type, id }) => {
+        try {
+            if (addonInstance.config.debug) {
+                console.log('[DEBUG] Meta handler called', { type, id, seriesCount: addonInstance.series.length });
+            }
+            if (id.startsWith('iptv_ev_')) {
+                return { meta: addonInstance.getEventMeta(id) };
+            }
+            if (type === 'series' || id.startsWith('iptv_series_')) {
+                const meta = await addonInstance.getDetailedMetaAsync(id, 'series');
+                if (addonInstance.config.debug) {
+                    console.log('[DEBUG] Series meta result', { id, found: !!meta, videos: meta?.videos?.length });
+                }
+                if (!meta) {
+                    // Fallback: Try to find in series list and return basic meta without episodes
+                    const seriesItem = addonInstance.series.find(s => s.id === id);
+                    if (seriesItem) {
+                        const fallbackMeta = {
+                            id: seriesItem.id,
+                            type: 'series',
+                            name: seriesItem.name,
+                            poster: seriesItem.poster || seriesItem.attributes?.['tvg-logo'] ||
+                                `https://placehold.co/300x450/3366CC/FFFFFF/png?text=${encodeURIComponent(seriesItem.name)}`,
+                            description: seriesItem.plot || seriesItem.attributes?.['plot'] || 'Series / Show',
+                            genres: seriesItem.category
+                                ? [seriesItem.category]
+                                : (seriesItem.attributes?.['group-title'] ? [seriesItem.attributes['group-title']] : ['Series']),
+                            videos: []
+                        };
+                        if (addonInstance.config.debug) {
+                            console.log('[DEBUG] Series meta fallback used', { id, name: seriesItem.name });
+                        }
+                        return { meta: fallbackMeta };
+                    }
+                }
+                return { meta: meta || null };
+            }
+            const meta = addonInstance.getDetailedMeta(id);
+            if (addonInstance.config.debug) {
+                console.log('[DEBUG] Meta request', { id, type, found: !!meta });
+            }
+            return { meta };
+        } catch (e) {
+            console.error('[META] Error', e);
+            return { meta: null };
+        }
+    });
+
+    const iface = builder.getInterface();
+    iface.setPublicBase = base => { addonInstance.publicBase = base; };
+    iface.renderEventCard = id => addonInstance.renderEventCard(id);
+    iface.eventCardFallback = id => {
+        const e = addonInstance.liveEventIndex().get(id);
+        return e ? eventCardUrl(e) : null;
+    };
+    addonInstance.manifestReady = true;
+    addonInstance.buildGenresInManifest();
+
+    // POST-BUILD: Inject 'options' into each catalog's genre extra entry.
+    // This MUST happen after getInterface() because the SDK linter would reject
+    // the large options arrays during build. The manifest object is shared by
+    // reference, so mutating it here affects the iface.manifest served by our
+    // custom manifest.json route in server.js.
+    for (const catalog of manifest.catalogs) {
+        if (Array.isArray(catalog.genres) && catalog.genres.length > 0) {
+            if (Array.isArray(catalog.extra)) {
+                const genreExtra = catalog.extra.find(e => e.name === 'genre');
+                if (genreExtra) {
+                    genreExtra.options = [...catalog.genres];
+                }
+            }
+        }
     }
+
+    return iface;
 }
 
 module.exports = createAddon;
 module.exports.redisStatus = redisStatus;
+module.exports.M3UEPGAddon = M3UEPGAddon;
+module.exports.baseManifest = baseManifest;
+module.exports.initialLoad = initialLoad;
+module.exports.buildInterface = buildInterface;
+module.exports.EVENT_STREAMS_MAX = EVENT_STREAMS_MAX;

@@ -4,3 +4,4 @@
 .well-known/
 test.js
 node_modules/
+providers.json
