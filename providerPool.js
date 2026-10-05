@@ -280,6 +280,15 @@ class ProviderPool extends M3UEPGAddon {
         return meta;
     }
 
+    channelById(id) {
+        return this.tileById.get(id) || null;
+    }
+
+    channelWeight(ch) {
+        const tile = this.tileById.get(ch.id);
+        return tile ? tile._primary.length : 0;
+    }
+
     memberStream(m, name) {
         const child = this.childById.get(m._pid);
         const stream = child && child.getStream(m._src);

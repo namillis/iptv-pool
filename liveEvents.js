@@ -618,6 +618,8 @@ function buildNetworkIndex(channels, groupOf) {
         }
         for (const n of BROADCAST_NETWORKS) {
             if (!n.re.test(name)) continue;
+            // Station news channels like "NBC 2 News" match the affiliate pattern but don't carry network games.
+            if (n.broadcast && /\bNEWS\b/.test(name)) break;
             slot(n).all.push(link);
             if (n.national && n.national.test(name)) slot(n).national.push(link);
             break;
@@ -674,6 +676,39 @@ function keepListedNetworks(e, nets) {
         const n = channelNetwork(c.slot);
         return !n || nets.includes(n);
     });
+}
+
+function broadcastNetworkOf(slotName) {
+    const n = channelNetwork(slotName);
+    return n && n.broadcast ? n.names[0] : null;
+}
+
+// A bare "US - NBC" feed has no city or call sign, so its guide mapping is a guess.
+function isNationalFeed(slotName) {
+    const n = channelNetwork(slotName);
+    return !!(n && n.national && n.national.test(networkName(slotName).toUpperCase()));
+}
+
+function isNorthAmerican(slotName) {
+    return NORTH_AMERICA_CHANNEL_RE.test(slotName || '');
+}
+
+function sideNamed(names, words) {
+    return names.some(n => {
+        const w = teamWords(n);
+        return w.length > 0 && words.has(w[w.length - 1]);
+    });
+}
+
+// Whether a channel's guide programme at game time is this game: 'match', 'other' when something else is on,
+// or 'unknown' when there's no listing, the event has no teams, or the listing is a generic one like "NFL Football".
+function programmeVerdict(e, p) {
+    if (!p || !e.teams) return 'unknown';
+    const words = new Set(teamWords([p.t, p.st, p.d].filter(Boolean).join(' ')));
+    const sides = e.gameTeams || e.teams.map(t => [t]);
+    if (sides.every(names => sideNamed(names, words))) return 'match';
+    if (matchupOf(p.st) || matchupOf(p.t)) return 'other';
+    return SPORT_TITLE.test(p.t || '') || looksLikeGame(p.t || '') ? 'unknown' : 'other';
 }
 
 function addScheduleNetworks(byKey, games, channels, groupOf, now) {
@@ -783,7 +818,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         if (ev.day !== 'assumed') entry.assumedDay = false;
         const src = sourceLabel(group);
         if (!entry.sources.includes(src)) entry.sources.push(src);
-        entry.channels.push({ id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null });
+        entry.channels.push({ id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null, kind: 'slot' });
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
     dropGuideReplays(byKey, schedule);
@@ -910,4 +945,4 @@ function todayEvents(index, now = Date.now(), { genre = null, includeAssumed = f
     return out.sort((a, b) => a.start - b.start || a.title.localeCompare(b.title));
 }
 
-module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, SPORT_CATEGORIES };
+module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES };

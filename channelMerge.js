@@ -4,7 +4,7 @@ const PREFIX_RE = /^\s*[|[(]?\s*([A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{2,6})?)\s*[-|:�
 const COMPOUND_REGIONS = new Set(['LATIN', 'ASIA', 'EU', 'AF', 'AM']);
 const COUNTRY_ALIASES = { USA: 'US', GB: 'UK' };
 const NORTH_AMERICA = new Set(['US', 'CA']);
-const TRAILING_RE = /\s*(?:\[(?:BK|BACKUP|B|NOT 24\/7|GEO-BLOCKED)\]|\((?:BACKUP|BK|\d{3,4}P|SD|HD)\)|\b(?:UHD\+?|FHD\+?|HD\+?|SD|4K\+?|8K|HEVC|H\.?26[45]|RAW|LOW|VIP|BACKUP|BK|\d{2}\s?FPS|\d{3,4}P)|[◉●○★☆✪⭐♦|*\-–—:.]+)\s*$/;
+const TRAILING_RE = /\s*(?:\[(?:BK\d*|BACKUP\d*|B\d*|NOT 24\/7|GEO-BLOCKED)\]|\((?:BACKUP|BK|\d{3,4}P|SD|HD)\)|\b(?:UHD\+?|FHD\+?|HD\+?|SD|4K\+?|8K|HEVC|H\.?26[45]|RAW|LOW|VIP|BACKUP|BK|\d{2}\s?FPS|\d{3,4}P)|[◉●○★☆✪⭐♦|*\-–—:.]+)\s*$/;
 const FEED_RE = /\s*(?:\((?:EAST|E)\)|\[EAST\]|(?<!MIDDLE)\s+EAST)\s*$/;
 const GENERIC_TAIL_RE = /\s+(?:TV|CHANNEL)\s*$/;
 const NETWORK_RE = /\b(ABC|CBS|NBC|FOX|PBS|CW|ION|METV|TELEMUNDO|UNIVISION|UNIMAS|MY(?:NETWORK)?(?:TV)?|IND(?:EPENDENT)?)\b/;
@@ -85,7 +85,7 @@ const qualityCache = new Map();
 
 function streamQuality(name) {
     const tail = prepare(name).slice(-24);
-    const backup = /\[(?:BK|BACKUP|B)\]|\bBACKUP\b/.test(tail);
+    const backup = /\[(?:BK|BACKUP|B)\d*\]|\bBACKUP\b/.test(tail);
     let label = backup ? 'Backup' : '';
     let rank = backup ? 1.5 : 1;
     for (const [re, l, r] of QUALITY_RULES) {

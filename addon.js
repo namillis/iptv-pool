@@ -6,7 +6,7 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const crypto = require("crypto");
 const LRUCache = require("./lruCache");
 const { parseXmltvStream } = require("./epgParser");
-const { buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, categoryOf, applyLiveActivity, SPORT_CATEGORIES } = require("./liveEvents");
+const { buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, categoryOf, applyLiveActivity, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES } = require("./liveEvents");
 const eventCards = require("./eventCard");
 const { getSchedule } = require("./espnSchedule");
 const { getLiveActivity } = require("./polymarketLive");
@@ -179,7 +179,9 @@ const EPG_CACHE_PREFIX = 'addon:epg:v2:';
 const CATCHUP_TTL_MS = 5 * 60 * 1000;
 const EVENT_INDEX_TTL_MS = 10 * 60 * 1000;
 const LIVE_NOW_CACHE_S = 60;
-const EVENT_STREAMS_MAX = 25;
+const EVENT_STREAMS_MAX = 15;
+const AFFILIATES_PER_NETWORK = 4;
+const GUIDE_CHECK_OFFSET_MS = 10 * 60000;
 const cardCache = new LRUCache({ max: 400, ttl: 12 * 3600 * 1000 });
 const CATCHUP_CACHE_MAX = 200;
 const EPG_DESC_MAX = 400;
@@ -465,7 +467,7 @@ class M3UEPGAddon {
     eventMetaPreview(e, now = Date.now()) {
         const when = this.formatEventTime(e.start, now);
         const live = eventState(e, now) === 'live';
-        const count = e.channels.length;
+        const count = this.rankedEventChannels(e, now).length;
         const headline = e.status === 'in' && e.statusDetail
             ? `🔴 Live · ${e.statusDetail}`
             : (live ? `🔴 Live now · started ${when}` : `⏰ Starts ${when}`);
@@ -481,9 +483,63 @@ class M3UEPGAddon {
         };
     }
 
+    channelById(id) {
+        if (this.channelMapFor !== this.channels) {
+            this.channelMap = new Map(this.channels.map(c => [c.id, c]));
+            this.channelMapFor = this.channels;
+        }
+        return this.channelMap.get(id) || null;
+    }
+
+    channelWeight() {
+        return 1;
+    }
+
+    programmeAt(epgId, atSeconds) {
+        const list = this.epgList(epgId);
+        if (!list) return null;
+        for (const p of list) {
+            if (p.s > atSeconds) break;
+            if (atSeconds < p.e) return p;
+        }
+        return null;
+    }
+
+    // Best first: affiliates and other North American channels whose guide shows the game, the provider's own event
+    // slots, other guide matches, then channels with no listing. Channels whose guide shows something else are dropped,
+    // and only a few affiliates of one network are kept since they all carry the same broadcast.
+    rankedEventChannels(e, now = Date.now()) {
+        const at = Math.max(now, e.start + GUIDE_CHECK_OFFSET_MS) / 1000;
+        const ranked = [];
+        e.channels.forEach((ch, i) => {
+            let tier = 1;
+            if (ch.kind !== 'slot') {
+                const item = this.channelById(ch.id);
+                const verdict = programmeVerdict(e, item && this.programmeAt(this.epgIdOf(item), at));
+                if (verdict === 'other') return;
+                const domestic = isNorthAmerican(ch.slot);
+                tier = verdict === 'match' ? (domestic ? 0 : 2) : (domestic ? 3 : 4);
+                if (isNationalFeed(ch.slot)) tier = Math.max(tier, 3);
+            }
+            ranked.push({ ch, tier, weight: this.channelWeight(ch), i });
+        });
+        ranked.sort((a, b) => a.tier - b.tier || b.weight - a.weight || a.i - b.i);
+        const perNetwork = new Map();
+        const out = [];
+        for (const { ch } of ranked) {
+            const net = broadcastNetworkOf(ch.slot);
+            if (net) {
+                const n = perNetwork.get(net) || 0;
+                if (n >= AFFILIATES_PER_NETWORK) continue;
+                perNetwork.set(net, n + 1);
+            }
+            out.push(ch);
+        }
+        return out;
+    }
+
     eventChannels(e) {
-        if (e.channels.length <= EVENT_STREAMS_MAX) return e.channels;
-        return [...e.channels].sort((a, b) => a.slot.length - b.slot.length).slice(0, EVENT_STREAMS_MAX);
+        return this.rankedEventChannels(e).slice(0, EVENT_STREAMS_MAX);
     }
 
     cardSpec(e) {
@@ -518,9 +574,10 @@ class M3UEPGAddon {
         const e = this.liveEventIndex().get(id);
         if (!e) return null;
         const meta = this.eventMetaPreview(e);
-        const shown = this.eventChannels(e);
+        const ranked = this.rankedEventChannels(e);
+        const shown = ranked.slice(0, EVENT_STREAMS_MAX);
         meta.description += '\n\n' + shown.map(c => `• ${this.eventChannelLabel(c)}`).join('\n');
-        if (shown.length < e.channels.length) meta.description += `\n…and ${e.channels.length - shown.length} more`;
+        if (shown.length < ranked.length) meta.description += `\n…and ${ranked.length - shown.length} more`;
         return meta;
     }
 
