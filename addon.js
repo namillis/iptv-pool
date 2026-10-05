@@ -174,6 +174,8 @@ function isSeparator(item) {
     return !!item && typeof item.name === 'string' && SEPARATOR_RE.test(item.name);
 }
 const EPG_FUTURE_MS = 36 * 3600000;
+// Programmes that ended this recently are kept, so a game that runs past its slot can still be matched at kickoff.
+const EPG_PAST_MS = 6 * 3600000;
 const EPG_REFRESH_MS = parseInt(process.env.EPG_REFRESH_MS || (3600 * 1000).toString(), 10);
 const EPG_CACHE_PREFIX = 'addon:epg:v2:';
 const CATCHUP_TTL_MS = 5 * 60 * 1000;
@@ -467,7 +469,7 @@ class M3UEPGAddon {
     eventMetaPreview(e, now = Date.now()) {
         const when = this.formatEventTime(e.start, now);
         const live = eventState(e, now) === 'live';
-        const count = this.rankedEventChannels(e, now).length;
+        const count = this.rankedEventChannels(e).length;
         const headline = e.status === 'in' && e.statusDetail
             ? `🔴 Live · ${e.statusDetail}`
             : (live ? `🔴 Live now · started ${when}` : `⏰ Starts ${when}`);
@@ -506,10 +508,11 @@ class M3UEPGAddon {
     }
 
     // Best first: affiliates and other North American channels whose guide shows the game, the provider's own event
-    // slots, other guide matches, then channels with no listing. Channels whose guide shows something else are dropped,
-    // and only a few affiliates of one network are kept since they all carry the same broadcast.
-    rankedEventChannels(e, now = Date.now()) {
-        const at = Math.max(now, e.start + GUIDE_CHECK_OFFSET_MS) / 1000;
+    // slots, other guide matches, generic sports listings, then channels with no listing. Channels whose guide shows
+    // something else are dropped, and only a few affiliates of one network are kept since they all carry the same
+    // broadcast. Guides are read just after kickoff, because games often run past their scheduled slot.
+    rankedEventChannels(e) {
+        const at = (e.start + GUIDE_CHECK_OFFSET_MS) / 1000;
         const ranked = [];
         e.channels.forEach((ch, i) => {
             let tier = 1;
@@ -518,8 +521,8 @@ class M3UEPGAddon {
                 const verdict = programmeVerdict(e, item && this.programmeAt(this.epgIdOf(item), at));
                 if (verdict === 'other') return;
                 const domestic = isNorthAmerican(ch.slot);
-                tier = verdict === 'match' ? (domestic ? 0 : 2) : (domestic ? 3 : 4);
-                if (isNationalFeed(ch.slot)) tier = Math.max(tier, 3);
+                tier = { match: domestic ? 0 : 2, likely: domestic ? 3 : 4, unknown: domestic ? 5 : 6 }[verdict];
+                if (isNationalFeed(ch.slot)) tier = 6;
             }
             ranked.push({ ch, tier, weight: this.channelWeight(ch), i });
         });
@@ -755,7 +758,7 @@ class M3UEPGAddon {
     async parseEPGStream(stream) {
         const start = Date.now();
         const wanted = this.epgWantedChannels();
-        const nowS = Math.floor(start / 1000);
+        const keepS = Math.floor((start - EPG_PAST_MS) / 1000);
         const endS = Math.floor((start + EPG_FUTURE_MS) / 1000);
         const timeCache = new Map();
         const toSec = (s) => {
@@ -776,7 +779,7 @@ class M3UEPGAddon {
                     if (wanted.size && !wanted.has(ch)) return null;
                     const s = toSec(startAttr);
                     const e = toSec(stopAttr);
-                    return e > nowS && s <= endS ? [s, e] : null;
+                    return e > keepS && s <= endS ? [s, e] : null;
                 },
                 onProgramme: (ch, [s, e], title, desc, extra = {}) => {
                     const p = { s, e, t: title || 'Unknown' };

@@ -700,15 +700,15 @@ function sideNamed(names, words) {
     });
 }
 
-// Whether a channel's guide programme at game time is this game: 'match', 'other' when something else is on,
-// or 'unknown' when there's no listing, the event has no teams, or the listing is a generic one like "NFL Football".
+// Whether a channel's guide programme at game time is this game: 'match', 'likely' for a generic listing like
+// "NFL Football", 'other' when something else is on, or 'unknown' when there's no listing or the event has no teams.
 function programmeVerdict(e, p) {
     if (!p || !e.teams) return 'unknown';
     const words = new Set(teamWords([p.t, p.st, p.d].filter(Boolean).join(' ')));
     const sides = e.gameTeams || e.teams.map(t => [t]);
     if (sides.every(names => sideNamed(names, words))) return 'match';
     if (matchupOf(p.st) || matchupOf(p.t)) return 'other';
-    return SPORT_TITLE.test(p.t || '') || looksLikeGame(p.t || '') ? 'unknown' : 'other';
+    return SPORT_TITLE.test(p.t || '') || looksLikeGame(p.t || '') ? 'likely' : 'other';
 }
 
 function addScheduleNetworks(byKey, games, channels, groupOf, now) {
