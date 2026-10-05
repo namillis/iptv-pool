@@ -217,8 +217,12 @@ function splitNetworkPrefix(title) {
 const SPORT_CATEGORY = /sport|football|soccer|f[uú]tbol|basketball|baseball|hockey|tennis|golf|cricket|rugby|boxing|mma|martial|wrestling|motor|racing|cycling|athletics|volleyball|darts|snooker|lacrosse|softball|deportes/i;
 const SPORT_CHANNEL = /sport|espn|\bfs[12]\b|fox soccer|\btnt\b|\btbs\b|nbc ?sports|cbs ?sports|bein|dazn|eurosport|\bnfl\b|nhl network|mlb network|nba tv|big ?ten|\bbtn\b|sec network|acc network|golf|tennis|setanta|\btsn\b|sportsnet|willow|supersport|premier sports|bt ?sport|fight|\bufc\b|racing|\bmsg\b|nesn|marquee|altitude|monumental|root sports|fubo|trutv/i;
 const SPORT_TITLE = /\b(football|soccer|f[uú]tbol|basketball|baseball|hockey|tennis|golf|cricket|rugby|boxing|mma|ufc|wrestling|volleyball|lacrosse|softball|darts|snooker|cycling|nascar|indycar|motogp|formula 1|f1|grand prix|nfl|nba|wnba|mlb|nhl|mls|ncaa|premier league|la ?liga|serie a|bundesliga|ligue 1|champions league|europa league|nations league|world cup)\b/i;
+// Films like "Love & Basketball" match the sport words, so movie channels never contribute games.
+const MOVIE_CHANNEL = /\b(?:cinemas?|movies?|films?|filmes|pel[ií]culas|cine|showtime|sho|hbo|starz|encore|cinemax|mgm\+?|epix|tcm|amc|ifc|sundance|hallmark|lifetime|bet)\b/i;
 const NOT_LIVE_TITLE = /\b(highlights?|hl|magazine|show|preview|review|countdown|tonight|today|center|centre|report|update|news|talk|daily|plays of the week|inside|recap|rewind|classics?|best of|replay|encore|pre-?game|post-?game|kickoff|studio|analysis|podcast|documentary|30 for 30|debrief|upcoming)\b|\blive\s*$/i;
 const REPLAY_DESC = /\b(relive|highlights|best of|looks? back|replay|rewind|classic|revisit|from earlier|from last)\b/i;
+// Studio shows on event channels ("NFL Gameday Final", "Sunday NFL Countdown", "Inside The NBA"). Matchups are never studio shows.
+const STUDIO_SHOW_RE = /\b(?:highlights?|countdown|pre-?game|post-?game|pre-?kick|studio|halftime|huddle|scoreboard|band performances?|warm-?ups?|recap|primetime|sportscenter|sportsnet central|espn fc|in the crease|coach'?e?s show|college gameday|gameday (?:final|live|kickoff)|nfl live|(?:night|sec|acc|big ten|college) football final)\b|^inside the\b|\b(?:live|today|tonight|center|centre)\s*$/i;
 // A team name, optionally followed by a two-letter state tag as in "Maryville (Mo)".
 const SIDE = "([\\p{Lu}\\p{N}][\\p{L}\\p{N}.'’&/ -]{0,40}?(?:\\s\\(\\p{Lu}\\p{L}\\.?\\))?)";
 // A ranking in front of a team ("#24 Colorado", "No. 3 Kentucky"). It is matched but kept out of the team name.
@@ -311,17 +315,28 @@ function teamMatches(side, names) {
     return names.some(n => nameMatches(side, n));
 }
 
+function hasTeams(g, [x, y]) {
+    return (teamMatches(x, g.teams[0]) && teamMatches(y, g.teams[1])) ||
+        (teamMatches(x, g.teams[1]) && teamMatches(y, g.teams[0]));
+}
+
 function findGame(e, games) {
     let best = null;
-    const [x, y] = e.teams;
     for (const g of games) {
         const d = Math.abs(g.start - e.start);
         if (d > SCHEDULE_WINDOW_MS) continue;
-        const hit = (teamMatches(x, g.teams[0]) && teamMatches(y, g.teams[1])) ||
-            (teamMatches(x, g.teams[1]) && teamMatches(y, g.teams[0]));
-        if (hit && (!best || d < best.d)) best = { g, d };
+        if (hasTeams(g, e.teams) && (!best || d < best.d)) best = { g, d };
     }
     return best ? best.g : null;
+}
+
+// A guide airing of a game that ESPN already lists as finished earlier in the day is a replay.
+function dropGuideReplays(byKey, games) {
+    if (!games || !games.length) return;
+    for (const [key, e] of byKey) {
+        if (!e.fromGuide || !e.teams || findGame(e, games)) continue;
+        if (games.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams))) byKey.delete(key);
+    }
 }
 
 // Polymarket sides are [full name, name, alias]. College names are mascots ("Warhawks"), so one side may match
@@ -401,6 +416,7 @@ function guideEvent(p, channelLabel, now = Date.now()) {
     const sportTitle = SPORT_TITLE.test(title);
     const sportChannel = SPORT_CHANNEL.test(channelLabel);
     if (!sportCat && !sportTitle && !(sportChannel && p.l)) return null;
+    if (!p.l && !sportCat && !sportChannel && MOVIE_CHANNEL.test(channelLabel)) return null;
     if (!p.l && NOT_LIVE_TITLE.test(title)) return null;
     if (!p.l && REPLAY_DESC.test(p.d || '')) return null;
     const matchup = matchupOf(p.st) || matchupOf(title) || matchupOf(p.d);
@@ -415,27 +431,39 @@ function guideEvent(p, channelLabel, now = Date.now()) {
     return { name, league, teams: matchup ? matchup.teams : null };
 }
 
-const GP_WORD_RE = /([\p{L}]+)\s+(?:grand prix|gp)\b/iu;
+// "Singapore Grand Prix", "Bahrain GP", or the European order: "GP de Mónaco", "GP Bahrain".
+const GP_NAME_RES = [
+    /([\p{L}]+)\s+(?:grand prix|gp)\b/iu,
+    /\b(?:grand prix|gran premio|grande pr[eé]mio|gp)\s+(?:(?:de|do|da|del|di|of|von)\s+)?([\p{L}]+)/iu
+];
 const F1_RE = /\bf1\b|formula (?:1|one)\b/i;
 const RACE_LIVE_WINDOW_MS = 3 * 3600000;
+const WEEKEND_LEAD_MS = 12 * 3600000;
 const WEEKEND_MS = 4 * 86400000;
 
-// Guides rarely flag repeats, so an F1 race that ESPN's calendar says is already over is treated as a replay.
+function gpStem(title) {
+    for (const re of GP_NAME_RES) {
+        const m = String(title || '').match(re);
+        if (m) return m[1].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').slice(0, 5);
+    }
+    return null;
+}
+
+function raceWeekendCovers(r, start) {
+    const last = r.raceStart || r.weekendEnd;
+    const end = last ? last + RACE_LIVE_WINDOW_MS : r.weekendStart + WEEKEND_MS;
+    return start >= r.weekendStart - WEEKEND_LEAD_MS && start <= end;
+}
+
+// Guides rarely flag repeats, so F1 that airs outside its race weekend on ESPN's calendar is treated as a replay.
+// A broadcast that names its Grand Prix has to fall in that race's weekend; one that doesn't, in any weekend.
 function isRaceReplay(p, start, races) {
     if (!races || !races.length) return false;
     const title = p.t || '';
-    const word = (title.match(GP_WORD_RE) || [])[1];
-    if (!word || !F1_RE.test(`${title} ${p.d || ''}`)) return false;
-    const stem = word.toLowerCase().slice(0, 5);
-    let latest = null;
-    for (const r of races) {
-        const w = (r.name.match(GP_WORD_RE) || [])[1];
-        if (!w || w.toLowerCase().slice(0, 5) !== stem || r.weekendStart > start) continue;
-        if (!latest || r.weekendStart > latest.weekendStart) latest = r;
-    }
-    if (!latest) return false;
-    if (latest.raceStart && latest.finished) return start > latest.raceStart + RACE_LIVE_WINDOW_MS;
-    return start > latest.weekendStart + WEEKEND_MS;
+    if (!F1_RE.test(`${title} ${p.d || ''}`)) return false;
+    const stem = gpStem(title);
+    const named = stem ? races.filter(r => gpStem(r.name) === stem) : [];
+    return !(named.length ? named : races).some(r => raceWeekendCovers(r, start));
 }
 
 function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
@@ -477,6 +505,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
                     start,
                     end,
                     assumedDay: false,
+                    fromGuide: true,
                     sources: [],
                     channels: []
                 };
@@ -736,10 +765,12 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         let entry = byKey.get(key);
         if (!entry) {
             const { network, title } = splitNetworkPrefix(titleCase(ev.title.replace(NOISE_PARENS, '').trim()));
+            const teams = matchupOf(title)?.teams || null;
+            if (!teams && STUDIO_SHOW_RE.test(title)) continue;
             entry = {
                 id: 'iptv_ev_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16),
                 title,
-                teams: matchupOf(title)?.teams || null,
+                teams,
                 start: ev.start,
                 end: ev.end,
                 assumedDay: ev.day === 'assumed',
@@ -755,11 +786,13 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         entry.channels.push({ id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null });
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
+    dropGuideReplays(byKey, schedule);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
     for (const e of byKey.values()) {
         if (e.game) e.gameTeams = e.game.teams;
         delete e.game;
+        delete e.fromGuide;
     }
     const byId = new Map();
     for (const e of byKey.values()) byId.set(e.id, e);

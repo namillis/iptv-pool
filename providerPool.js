@@ -317,17 +317,34 @@ class ProviderPool extends M3UEPGAddon {
         return streams.map(s => ({ ...s, name: `${child.poolName}\n${s.name}` }));
     }
 
+    // Each channel once first, so the cap isn't spent on copies of a few channels, then backups from other providers.
     getEventStreams(id) {
         const e = this.liveEventIndex().get(id);
         if (!e) return [];
-        const streams = [];
+        const lists = [];
         for (const ch of this.eventChannels(e)) {
             const tile = this.tileById.get(ch.id);
-            if (!tile) continue;
-            for (const m of tile._primary) {
+            if (tile) lists.push({ ch, members: [...tile._primary] });
+        }
+        const streams = [];
+        const take = ({ ch, members }) => {
+            while (members.length) {
+                const m = members.shift();
                 const s = this.memberStream(m, `${this.childById.get(m._pid).poolName}\n${ch.source}`);
-                if (s) streams.push(s);
-                if (streams.length >= EVENT_STREAMS_MAX) return streams;
+                if (s) {
+                    streams.push(s);
+                    return;
+                }
+            }
+        };
+        for (const l of lists) {
+            if (streams.length >= EVENT_STREAMS_MAX) return streams;
+            take(l);
+        }
+        while (streams.length < EVENT_STREAMS_MAX && lists.some(l => l.members.length)) {
+            for (const l of lists) {
+                if (streams.length >= EVENT_STREAMS_MAX) break;
+                take(l);
             }
         }
         return streams;
