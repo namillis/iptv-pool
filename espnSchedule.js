@@ -187,7 +187,8 @@ function parseRaces(json) {
     const races = [];
     for (const c of json?.leagues?.[0]?.calendar || []) {
         const start = Date.parse(c.startDate);
-        if (c.label && !isNaN(start)) races.push({ name: c.label, weekendStart: start });
+        const end = Date.parse(c.endDate);
+        if (c.label && !isNaN(start)) races.push({ name: c.label, weekendStart: start, weekendEnd: isNaN(end) ? null : end });
     }
     for (const ev of json?.events || []) {
         const race = (ev.competitions || []).find(c => /^race$/i.test(c.type?.abbreviation || ''));
