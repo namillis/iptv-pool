@@ -60,7 +60,8 @@ const TIMEOUT_MS = 8000;
 const CONCURRENCY = 6;
 const EARLY_HOURS = 6;
 
-const state = { games: [], version: 0, at: 0, failedAt: 0, loading: null };
+const state = { games: [], races: [], version: 0, at: 0, failedAt: 0, loading: null };
+const F1_URL = `${BASE_URL}racing/f1/scoreboard`;
 // ESPN stops listing ticket prices once a game starts, so the last price seen is kept per game.
 const ticketMemo = new Map();
 
@@ -181,6 +182,34 @@ function scoreGames(games, featured, now) {
     return games;
 }
 
+// Grand Prix weekends from ESPN's F1 calendar, plus the current weekend's race time and whether it has finished.
+function parseRaces(json) {
+    const races = [];
+    for (const c of json?.leagues?.[0]?.calendar || []) {
+        const start = Date.parse(c.startDate);
+        if (c.label && !isNaN(start)) races.push({ name: c.label, weekendStart: start });
+    }
+    for (const ev of json?.events || []) {
+        const race = (ev.competitions || []).find(c => /^race$/i.test(c.type?.abbreviation || ''));
+        const start = race && Date.parse(race.date);
+        if (!ev.name || !start) continue;
+        let entry = races.find(r => r.name === ev.name && Math.abs(r.weekendStart - start) < 7 * 86400000);
+        if (!entry) races.push(entry = { name: ev.name, weekendStart: Date.parse(ev.date) || start });
+        entry.raceStart = start;
+        entry.finished = !!race.status?.type?.completed;
+    }
+    return races;
+}
+
+async function fetchRaces() {
+    try {
+        return parseRaces(await fetchJson(F1_URL));
+    } catch (e) {
+        console.warn('[ESPN] F1 calendar failed:', e.message);
+        return null;
+    }
+}
+
 async function refresh(now) {
     const dates = [etDate(now)];
     if (parseInt(hourFmt.format(new Date(now)), 10) < EARLY_HOURS) dates.unshift(etDate(now - 86400000));
@@ -189,6 +218,7 @@ async function refresh(now) {
         for (const d of dates) jobs.push({ url: `${BASE_URL}${path}/scoreboard?dates=${d}&limit=500${query ? '&' + query : ''}`, sport, tier });
     }
     const featured = featuredIds();
+    const races = fetchRaces();
     const games = [];
     const seen = new Set();
     let loaded = 0;
@@ -207,15 +237,16 @@ async function refresh(now) {
         }
     }
     if (!loaded) throw new Error('no scoreboards loaded');
-    return scoreGames(games, await featured, now);
+    return { games: scoreGames(games, await featured, now), races: await races };
 }
 
 function getSchedule(now = Date.now()) {
     const stale = now - state.at > REFRESH_MS && now - state.failedAt > RETRY_MS;
     if (stale && !state.loading) {
         state.loading = refresh(now)
-            .then(games => {
+            .then(({ games, races }) => {
                 state.games = games;
+                if (races) state.races = races;
                 state.at = Date.now();
                 state.version++;
             })
@@ -228,4 +259,4 @@ function getSchedule(now = Date.now()) {
     return state;
 }
 
-module.exports = { getSchedule, parseScoreboard, LEAGUES };
+module.exports = { getSchedule, parseScoreboard, parseRaces, LEAGUES };

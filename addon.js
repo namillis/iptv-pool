@@ -349,6 +349,19 @@ class M3UEPGAddon {
         return item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'] || null;
     }
 
+    channelGroups(c) {
+        const g = this.channelGroup(c);
+        return g ? [g] : [];
+    }
+
+    inGroup(item, group) {
+        return this.channelGroup(item) === group;
+    }
+
+    searchText(item) {
+        return item.name.toLowerCase();
+    }
+
     buildGroupCatalogs(tvCatalog) {
         const catalogs = this.manifestRef.catalogs;
         for (let i = catalogs.length - 1; i >= 0; i--) {
@@ -364,11 +377,12 @@ class M3UEPGAddon {
         const ordered = [];
         const seen = new Set();
         for (const c of this.channels) {
-            const g = this.channelGroup(c);
-            if (!g || seen.has(g)) continue;
-            seen.add(g);
-            if (terms.length && !terms.some(t => g.toLowerCase().includes(t))) continue;
-            ordered.push(g);
+            for (const g of this.channelGroups(c)) {
+                if (seen.has(g)) continue;
+                seen.add(g);
+                if (terms.length && !terms.some(t => g.toLowerCase().includes(t))) continue;
+                ordered.push(g);
+            }
         }
 
         const groupCatalogs = ordered.slice(0, GROUP_CATALOG_MAX).map(name => {
@@ -386,7 +400,7 @@ class M3UEPGAddon {
         if (existing !== -1) catalogs.splice(existing, 1);
         const channels = this.channels.filter(c => this.catchupEnabledFor(c));
         if (!channels.length) return;
-        const groups = [...new Set(channels.map(c => this.channelGroup(c)).filter(Boolean))]
+        const groups = [...new Set(channels.flatMap(c => this.channelGroups(c)))]
             .sort((a, b) => a.localeCompare(b));
         catalogs.splice(catalogs.indexOf(tvCatalog) + 1, 0, {
             type: 'tv',
@@ -409,7 +423,8 @@ class M3UEPGAddon {
                 groupOf: c => this.channelGroup(c),
                 epgData: this.epgData,
                 epgIdOf: c => this.epgIdOf(c),
-                schedule: schedule.games
+                schedule: schedule.games,
+                races: schedule.races
             });
             this.eventIndexFor = this.channels;
             this.eventIndexEpg = this.epgData;
@@ -515,13 +530,9 @@ class M3UEPGAddon {
         const streams = [];
         for (const ch of this.eventChannels(e)) {
             const stream = this.getStream(ch.id);
-            if (stream) streams.push({ ...stream, name: this.eventStreamName(ch, stream), title: ch.slot });
+            if (stream) streams.push({ ...stream, name: ch.source, title: ch.slot });
         }
         return streams;
-    }
-
-    eventStreamName(ch) {
-        return ch.source;
     }
 
     eventChannelLabel(ch) {
@@ -543,14 +554,8 @@ class M3UEPGAddon {
         }
 
         if (tvCatalog) {
-            const groups = [
-                ...new Set(
-                    this.channels
-                        .map(c => c.category || c.attributes?.['group-title'])
-                        .filter(Boolean)
-                        .map(s => s.trim())
-                )
-            ].sort((a, b) => a.localeCompare(b));
+            const groups = [...new Set(this.channels.flatMap(c => this.channelGroups(c)))]
+                .sort((a, b) => a.localeCompare(b));
             if (!groups.includes('All Channels')) groups.unshift('All Channels');
             setGenresOnCatalog(tvCatalog, groups);
             this.buildGroupCatalogs(tvCatalog);
@@ -901,6 +906,7 @@ class M3UEPGAddon {
             this.lastUpdate = Date.now();
             if (refreshEpg) this.lastEpgUpdate = this.lastUpdate;
             if (CACHE_ENABLED) await this.saveToCache(refreshEpg);
+            this.lastError = null;
             this.buildGenresInManifest();
             this.log.debug('Data update complete', {
                 channels: this.channels.length,
@@ -910,6 +916,8 @@ class M3UEPGAddon {
                 ms: Date.now() - start
             });
         } catch (e) {
+            this.lastError = e.message;
+            this.lastErrorAt = Date.now();
             this.log.error('[UPDATE] Failed:', e.message);
         }
     }
@@ -958,6 +966,11 @@ class M3UEPGAddon {
                 : (item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Series']);
         }
         return meta;
+    }
+
+    getStreams(id) {
+        const stream = this.getStream(id);
+        return stream ? [stream] : [];
     }
 
     getStream(id) {
@@ -1273,7 +1286,7 @@ function buildInterface(addonInstance, manifest) {
                 items = addonInstance.channels.filter(c => addonInstance.catchupEnabledFor(c));
             } else if (args.type === 'tv' && args.id.startsWith('iptv_grp_')) {
                 const group = addonInstance.groupCatalogMap?.get(args.id);
-                if (group) items = addonInstance.channels.filter(c => addonInstance.channelGroup(c) === group);
+                if (group) items = addonInstance.channels.filter(c => addonInstance.inGroup(c, group));
             } else if (args.type === 'movie' && args.id === 'iptv_movies') {
                 items = addonInstance.movies;
             } else if (args.type === 'series' && args.id === 'iptv_series') {
@@ -1286,16 +1299,13 @@ function buildInterface(addonInstance, manifest) {
             
             // If specific genre selected
             if (extra.genre && extra.genre !== 'All Channels') {
-                filtered = filtered.filter(i => {
-                    const cat = i.category || i.attributes?.['group-title'];
-                    return cat === extra.genre;
-                });
+                filtered = filtered.filter(i => addonInstance.inGroup(i, extra.genre));
             }
             
             // If searching
             if (extra.search) {
                 const q = extra.search.toLowerCase();
-                filtered = filtered.filter(i => i.name.toLowerCase().includes(q));
+                filtered = filtered.filter(i => addonInstance.searchText(i).includes(q));
             }
             
             // Pagination / Skip
@@ -1334,13 +1344,13 @@ function buildInterface(addonInstance, manifest) {
                 }
                 return { streams: [stream] };
             }
-            const stream = addonInstance.getStream(id);
-            if (!stream) return { streams: [] };
+            const streams = addonInstance.getStreams(id);
+            if (!streams.length) return { streams: [] };
             if (addonInstance.config.debug) {
-                console.log('[DEBUG] Stream request', { id, url: stream.url });
+                console.log('[DEBUG] Stream request', { id, streams: streams.length });
             }
             const catchup = type === 'tv' ? await addonInstance.getCatchupStreams(id) : [];
-            return { streams: [stream, ...catchup] };
+            return { streams: [...streams, ...catchup] };
         } catch (e) {
             console.error('[STREAM] Error', e);
             return { streams: [] };
