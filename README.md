@@ -317,10 +317,10 @@ The addon itself (`/<token>/manifest.json`, catalogs, streams, logos), `/health`
 
 If you pay for more than one provider, the server can load all of them and serve them as one addon. The logins stay in a file on the server instead of in the install link.
 
-- Every row (channels, groups, Catch-up TV, movies, series) lists items from all providers. Each stream is labeled with the provider it comes from.
-- **Live Now** and **Today** are built from all providers together, so a game on several providers is one tile with each provider's channels. Up to 25 streams are listed per event, taken from each provider in turn.
+- **Duplicate channels are merged.** `US - ESPN 2 HD ◉`, `US: ESPN 2` and `US| ESPN 2 HD [BK]` become one **US - ESPN 2** tile. Opening it lists a stream from every provider that carries it, best quality first, labeled with the provider and quality (`Main · HD`, `Backup · HD backup`). Channels are matched by country prefix and name, ignoring quality tags (HD, FHD, 4K, HEVC, SD), backup markers, symbols and spacing. Local US stations are matched by call sign, so `ABC 07 NEW YORK NY (WABC)` and `ABC New York WABC TV` merge. Different countries never merge, so `US - ESPN 2` and `LAT - ESPN 2` stay apart. Empty event slots named `NO MATCH` or `NO EVENT` are left out.
+- Movies and series are not merged yet. Each provider's copy is listed separately and labeled with its provider.
+- **Live Now** and **Today** are built from the merged channels, so a game is one tile and its streams cover every provider that has a matching channel, up to 25.
 - Each provider is fetched, cached and refreshed on its own. If one is down, the others keep working and the failed one is retried every 10 minutes.
-- The same channel from two providers still shows up twice in the channel rows. Merging duplicates is planned.
 
 ### Set it up
 
@@ -343,6 +343,7 @@ Create `providers.json` next to your compose file and `chmod 600` it:
 
 - `id`: 1-8 lowercase letters or digits. It becomes part of every item ID, so don't change it later or Stremio loses saved items from that provider.
 - `name`: shown on that provider's streams.
+- `country` (optional): a 2-3 letter code, e.g. `"US"`, for providers whose channel names have no country prefix, like the iptv-org lists. Without it, those channels only merge with other unprefixed channels.
 - `settings` apply to every provider. A provider can override any of them, along with its own guide fields (`epgUrl`, `epgOffsetHours`, `epgLocalTimes`, `enableEpg`).
 - Xtream providers take `xtreamUrl`, `xtreamUsername`, `xtreamPassword` and optionally `xtreamUseM3U` and `xtreamOutput`. Direct providers take `m3uUrl` and optionally `epgUrl`. The guide is on by default.
 
@@ -368,9 +369,20 @@ Restart with `docker compose up -d iptv`, then install:
 https://yourname.duckdns.org/pool-<POOL_KEY>/manifest.json
 ```
 
+### Status page
+
+`https://yourname.duckdns.org/pool-<POOL_KEY>/report` shows a plain-text summary:
+
+- channel counts per provider, and how many are shared or only on that provider
+- an overlap table, which shows when two logins resell the same channel list
+- when each provider last refreshed, or why it failed
+- each Xtream account's status, expiry and connections in use, checked live and cached for 5 minutes
+
+The page shows no logins or URLs.
+
 The key is the only thing protecting your provider logins, so treat that link like a password. A wrong key gets a 404. The pool has its own addon ID, so it can be installed next to a regular install. It has no Configure page: edit `providers.json` and run `docker compose restart iptv` instead. `providers.json` is listed in `.gitignore` and `.dockerignore`, so it can't end up in the repo or the image.
 
-**Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB. Providers with large movie and series libraries add more.
+**Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB, and merging adds about 5 MB per 10,000 channels. Providers with large movie and series libraries add more.
 
 ---
 

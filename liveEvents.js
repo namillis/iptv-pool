@@ -10,7 +10,7 @@ const SCHEDULE_RE = new RegExp(`\\s*(?:${DASH}\\s*)?${TOKEN}(?:\\s*\\/\\s*${TOKE
 const SLOT_SPLIT_RE = /\s:\s?|:\s/;
 const WEEKDAY_TAGS = [[/\(TNF\)|THURSDAY NIGHT/i, 4], [/\(MNF\)|MONDAY NIGHT/i, 1], [/\(SNF\)|SUNDAY NIGHT/i, 0]];
 const NOISE_PARENS = /\s*\((?:ESP|ESPAÑOL|ESPANOL|SPANISH|PORTUGUÊS|PORTUGUES|FRENCH|FRANÇAIS|ITALIANO|DEUTSCH|ENG|ENGLISH|UHD|FHD|HD|SD|4K|ALT|ALTERNATE)\)/gi;
-const ACRONYMS = new Set(['UFC', 'NFL', 'NHL', 'NBA', 'MLB', 'MLS', 'WNBA', 'NCAA', 'NCAAF', 'NCAAB', 'ATP', 'WTA', 'PGA', 'LPGA', 'F1', 'F2', 'F3',
+const ACRONYMS = new Set(['DAZN', 'UFC', 'NFL', 'NHL', 'NBA', 'MLB', 'MLS', 'WNBA', 'NCAA', 'NCAAF', 'NCAAB', 'ATP', 'WTA', 'PGA', 'LPGA', 'F1', 'F2', 'F3',
     'WRC', 'IMSA', 'UCI', 'AEW', 'WWE', 'PFL', 'BMX', 'MMA', 'PPV', 'TV', 'FC', 'SC', 'AFC', 'CF', 'KR', 'II', 'III', 'IV', 'US', 'USA', 'UK',
     'UEFA', 'FIFA', 'PDC', 'BKFC', 'MPC', 'VPRC', 'SNF', 'MNF', 'TNF', 'ODI', 'T20', 'NY', 'LA', 'PSG', 'RB', 'AC', 'CBS', 'ESPN', 'ESPN2', 'ESPNU', 'NJ',
     'UC', 'VCU', 'UCLA', 'USC', 'LSU', 'TCU', 'SMU', 'BYU', 'UCF', 'UNLV', 'UTEP', 'UTSA', 'FIU', 'FAU', 'UAB', 'UNC', 'NC', 'UIC', 'NJIT', 'SIU', 'UMBC', 'CSU', 'FGCU', 'SEC', 'ACC', 'AAC', 'MAC', 'CAA', 'NEC', 'SWAC', 'MEAC',
@@ -369,7 +369,7 @@ function annotateWithSchedule(byKey, games, now) {
 function networkName(channelName) {
     return String(channelName || '')
         .trim()
-        .replace(/^[A-Z]{2,7}\s*[-|:]\s*/, '')
+        .replace(/^(?:[A-Z]{2,7}-)?[A-Z]{2,7}\s*[-|:]\s*/, '')
         .replace(/[◉ᵛᶦᵖ]+/g, '')
         .replace(/\[[^\]]*\]/g, '')
         .replace(/\b(UHD|FHD|HD|SD|HEVC|4K|H265)\b/gi, '')
@@ -415,7 +415,30 @@ function guideEvent(p, channelLabel, now = Date.now()) {
     return { name, league, teams: matchup ? matchup.teams : null };
 }
 
-function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now) {
+const GP_WORD_RE = /([\p{L}]+)\s+(?:grand prix|gp)\b/iu;
+const F1_RE = /\bf1\b|formula (?:1|one)\b/i;
+const RACE_LIVE_WINDOW_MS = 3 * 3600000;
+const WEEKEND_MS = 4 * 86400000;
+
+// Guides rarely flag repeats, so an F1 race that ESPN's calendar says is already over is treated as a replay.
+function isRaceReplay(p, start, races) {
+    if (!races || !races.length) return false;
+    const title = p.t || '';
+    const word = (title.match(GP_WORD_RE) || [])[1];
+    if (!word || !F1_RE.test(`${title} ${p.d || ''}`)) return false;
+    const stem = word.toLowerCase().slice(0, 5);
+    let latest = null;
+    for (const r of races) {
+        const w = (r.name.match(GP_WORD_RE) || [])[1];
+        if (!w || w.toLowerCase().slice(0, 5) !== stem || r.weekendStart > start) continue;
+        if (!latest || r.weekendStart > latest.weekendStart) latest = r;
+    }
+    if (!latest) return false;
+    if (latest.raceStart && latest.finished) return start > latest.raceStart + RACE_LIVE_WINDOW_MS;
+    return start > latest.weekendStart + WEEKEND_MS;
+}
+
+function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
     for (const [epgId, list] of Object.entries(epgData || {})) {
         const chans = channelsByEpgId.get(epgId);
         if (!chans || !Array.isArray(list)) continue;
@@ -426,7 +449,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
             const end = p.e * 1000;
             if (end <= now - GUIDE_BEFORE_MS || start >= now + GUIDE_AHEAD_MS) continue;
             const g = guideEvent(p, label, now);
-            if (!g) continue;
+            if (!g || isRaceReplay(p, start, races)) continue;
             const src = sourceLabel(groupOf(first));
             const network = titleCase(networkName(first.name));
             const links = chans.map(c => ({ id: c.id, slot: (c.name || '').trim(), source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null }));
@@ -523,7 +546,8 @@ const BROADCAST_NETWORKS = [
 ];
 const NETWORK_BY_NAME = new Map();
 for (const n of BROADCAST_NETWORKS) for (const name of n.names) NETWORK_BY_NAME.set(name.toLowerCase().replace(/[^a-z0-9+]/g, ''), n);
-const US_CHANNEL_RE = /^\s*US\s*-\s*/;
+const US_CHANNEL_RE = /^\s*USA?\s*[-|:]\s*/;
+const NORTH_AMERICA_CHANNEL_RE = /^\s*(?:USA?|CA)\s*[-|:]\s*/;
 const MIRROR_RE = /^NCAAF \d+ : (.+)$/;
 const REGIONAL_WINDOW_MS = 3 * 3600000;
 const GENERIC_MATCH_MS = 20 * 60000;
@@ -655,7 +679,8 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
             if (e.teams || !e.programme || !e.network) continue;
             if (Math.abs(e.start - g.start) > GENERIC_MATCH_MS || !sportCompatible(g.sport, e.programme)) continue;
             const net = e.network.toUpperCase();
-            if (exact.some(n => n.re.test(net)) || e.channels.some(c => exact.includes(channelNetwork(c.slot)))) generic.push([key, e]);
+            const northAmerican = e.channels.some(c => NORTH_AMERICA_CHANNEL_RE.test(c.slot));
+            if ((northAmerican && exact.some(n => n.re.test(net))) || e.channels.some(c => exact.includes(channelNetwork(c.slot)))) generic.push([key, e]);
         }
         const espnNetworks = g.networks.filter(networkFor).slice(0, 2).join(' · ');
         if (!target && generic.length) {
@@ -694,7 +719,7 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
     }
 }
 
-function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null } = {}) {
+function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, races = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
     for (const c of channels) {
@@ -729,7 +754,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         if (!entry.sources.includes(src)) entry.sources.push(src);
         entry.channels.push({ id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null });
     }
-    if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now);
+    if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
     for (const e of byKey.values()) {
@@ -852,4 +877,4 @@ function todayEvents(index, now = Date.now(), { genre = null, includeAssumed = f
     return out.sort((a, b) => a.start - b.start || a.title.localeCompare(b.title));
 }
 
-module.exports = { parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, SPORT_CATEGORIES };
+module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, SPORT_CATEGORIES };

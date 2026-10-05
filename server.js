@@ -481,6 +481,21 @@ app.get("/:token/manifest.json", (req, res) => {
   res.end(JSON.stringify(manifest));
 });
 
+// Provider pool status page
+app.get("/:token/report", async (req, res) => {
+  const iface = req.addonInterface;
+  if (!iface || !iface.isPool) return res.status(404).json({ error: "Not found" });
+  try {
+    const text = await iface.poolReport();
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(text);
+  } catch (e) {
+    console.error("[POOL] Report failed:", e.message);
+    res.status(500).json({ error: "Report failed" });
+  }
+});
+
 // Stremio router (handles catalog, stream, meta)
 app.use("/:token", (req, res) => {
   const iface = req.addonInterface;
