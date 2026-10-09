@@ -50,7 +50,7 @@
 ## 🧪 Quick Start (Local Dev)
 
 ```bash
-git clone https://github.com/namillis/M3U-XCAPI-EPG-IPTV-Stremio.git
+git clone https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio.git
 cd M3U-XCAPI-EPG-IPTV-Stremio
 cp .env.example .env   # create your env (or export vars manually)
 npm install
@@ -679,7 +679,7 @@ Please include:
 - Sample (sanitized) playlist or line count
 - Logs with `DEBUG_MODE=true` (scrub credentials)
 
-Create an issue: https://github.com/namillis/M3U-XCAPI-EPG-IPTV-Stremio/issues
+Create an issue: https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio/issues
 
 ---
 
