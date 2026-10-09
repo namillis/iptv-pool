@@ -1521,4 +1521,5 @@ module.exports.M3UEPGAddon = M3UEPGAddon;
 module.exports.baseManifest = baseManifest;
 module.exports.initialLoad = initialLoad;
 module.exports.buildInterface = buildInterface;
+module.exports.markUsed = markUsed;
 module.exports.EVENT_STREAMS_MAX = EVENT_STREAMS_MAX;
