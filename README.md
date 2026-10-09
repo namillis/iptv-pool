@@ -150,13 +150,13 @@ Oracle Cloud's Always Free tier includes an ARM VM that runs this addon around t
 
 ### Run the addon
 
-Install Docker and clone your fork:
+Install Docker and clone the repo (or your own copy of it):
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker ubuntu   # log out and back in afterwards
 mkdir -p ~/stack/addons && cd ~/stack
-git clone https://github.com/<you>/M3U-XCAPI-EPG-IPTV-Stremio addons/iptv
+git clone https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio.git addons/iptv
 ```
 
 Create `~/stack/docker-compose.yml`:
@@ -224,9 +224,9 @@ docker compose logs -f caddy
 
 Then open `https://yourname.duckdns.org/`. Only Caddy publishes ports. The addon and Redis are reachable only on Docker's internal network.
 
-### Auto-deploy from GitHub
+### Auto-deploy from git
 
-The VM checks your fork every 2 minutes and rebuilds the addon when `main` moves. No secrets go into GitHub, and nothing needs to reach the VM over SSH.
+The VM checks the repo every 2 minutes and rebuilds the addon when `main` moves. No secrets go into the repo, and nothing needs to reach the VM over SSH.
 
 Create `~/stack/autodeploy.sh` and `chmod 755` it:
 
@@ -279,7 +279,7 @@ EOF
 
 sudo tee /etc/systemd/system/stack-autodeploy.timer >/dev/null <<'EOF'
 [Unit]
-Description=Check GitHub for IPTV addon updates every 2 minutes
+Description=Check for IPTV addon updates every 2 minutes
 
 [Timer]
 OnBootSec=2min
@@ -294,7 +294,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now stack-autodeploy.timer
 ```
 
-Logs are in `journalctl -u stack-autodeploy`. There is no automatic rollback: if a deploy breaks the addon, revert the commit on GitHub and the VM deploys the revert. Make changes through GitHub, not in the VM's checkout, or the fast-forward stops.
+Logs are in `journalctl -u stack-autodeploy`. There is no automatic rollback: if a deploy breaks the addon, revert the commit on `main` and the VM deploys the revert. Make changes by pushing to the repo, not in the VM's checkout, or the fast-forward stops.
 
 ### Site password
 
