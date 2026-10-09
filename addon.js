@@ -1315,12 +1315,33 @@ async function createAddon(config) {
     return buildPromise;
 }
 
+// Addons opened recently are refreshed on a timer, so the first catalog after a quiet stretch isn't built from old guides.
+const BACKGROUND_TICK_MS = 5 * 60 * 1000;
+const BACKGROUND_IDLE_MS = 7 * 24 * 3600000;
+const inUse = new Set();
+
+function markUsed(addonInstance, now = Date.now()) {
+    addonInstance.lastUsed = now;
+    inUse.add(addonInstance);
+}
+
+function refreshInBackground(now = Date.now()) {
+    for (const addonInstance of inUse) {
+        if (now - addonInstance.lastUsed > BACKGROUND_IDLE_MS) inUse.delete(addonInstance);
+        else if (addonInstance.needsRefresh(now)) addonInstance.updateData().catch(() => { });
+    }
+    if (inUse.size) getSchedule(now);
+}
+
+setInterval(refreshInBackground, BACKGROUND_TICK_MS).unref();
+
 function buildInterface(addonInstance, manifest) {
     const builder = new addonBuilder(manifest);
 
     builder.defineCatalogHandler(async (args) => {
         const start = Date.now();
         try {
+            markUsed(addonInstance);
             // Background update
             addonInstance.updateData().catch(() => { });
 
