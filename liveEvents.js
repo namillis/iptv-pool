@@ -330,12 +330,13 @@ function findGame(e, games) {
     return best ? best.g : null;
 }
 
-// A guide airing of a game that ESPN already lists as finished earlier in the day is a replay.
+// A guide airing of a game that ESPN already lists as finished is a replay, unless the same teams still have a game to play.
 function dropGuideReplays(byKey, games) {
     if (!games || !games.length) return;
     for (const [key, e] of byKey) {
         if (!e.fromGuide || !e.teams || findGame(e, games)) continue;
-        if (games.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams))) byKey.delete(key);
+        const played = games.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams));
+        if (played && !games.some(g => g.state !== 'post' && hasTeams(g, e.teams))) byKey.delete(key);
     }
 }
 
