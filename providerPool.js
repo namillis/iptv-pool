@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, EVENT_STREAMS_MAX } = require('./addon');
+const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, markUsed, EVENT_STREAMS_MAX } = require('./addon');
 const { channelKey, streamQuality, displayName, tileId, groupByKey } = require('./channelMerge');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 
@@ -469,6 +469,7 @@ async function createPoolAddon(file) {
     const pool = new ProviderPool(poolConfig, manifest);
     console.log(`[POOL] ${count} provider${count === 1 ? '' : 's'}: ${pool.children.map(c => `${c.poolId} (${c.providerName})`).join(', ')}`);
     await initialLoad(pool);
+    markUsed(pool);
     const iface = buildInterface(pool, manifest);
     iface.isPool = true;
     iface.poolReport = () => pool.report();
