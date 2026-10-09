@@ -58,7 +58,6 @@ const REFRESH_MS = 15 * 60000;
 const RETRY_MS = 2 * 60000;
 const TIMEOUT_MS = 8000;
 const CONCURRENCY = 6;
-const EARLY_HOURS = 6;
 
 const state = { games: [], races: [], version: 0, at: 0, failedAt: 0, loading: null };
 const F1_URL = `${BASE_URL}racing/f1/scoreboard`;
@@ -66,7 +65,6 @@ const F1_URL = `${BASE_URL}racing/f1/scoreboard`;
 const ticketMemo = new Map();
 
 const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
-const hourFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' });
 
 function etDate(ms) {
     return dateFmt.format(new Date(ms)).replace(/-/g, '');
@@ -212,8 +210,8 @@ async function fetchRaces() {
 }
 
 async function refresh(now) {
-    const dates = [etDate(now)];
-    if (parseInt(hourFmt.format(new Date(now)), 10) < EARLY_HOURS) dates.unshift(etDate(now - 86400000));
+    // Yesterday's scoreboards are loaded so a guide airing of a game that finished last night is recognized as a replay.
+    const dates = [etDate(now - 86400000), etDate(now)];
     const jobs = [];
     for (const [path, sport, tier, query] of LEAGUES) {
         for (const d of dates) jobs.push({ url: `${BASE_URL}${path}/scoreboard?dates=${d}&limit=500${query ? '&' + query : ''}`, sport, tier });
