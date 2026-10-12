@@ -352,6 +352,7 @@ if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
     const router = createXtreamRouter({
       usersFile: XTREAM_USERS_FILE,
       idsFile: path.join(dataDir, "xtream-ids.json"),
+      archiveFile: path.join(dataDir, "xtream-no-archive.json"),
       getPool: poolInterface,
     });
     app.use(router);

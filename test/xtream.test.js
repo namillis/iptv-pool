@@ -127,6 +127,17 @@ test("a view filters by country, orders categories and indexes streams by catego
   assert.strictEqual(all.count, 5);
 });
 
+test("a channel in the no-archive set is not advertised as catch-up", () => {
+  const pool = fakePool();
+  const bbc = pool.channels.find((t) => t._key === "UK|BBCONE");
+  const on = buildView(pool, new XtreamIds(null), ["UK", "US"]);
+  assert.strictEqual(on.entries.find((e) => e.tile === bbc).stream.tv_archive, 1);
+  const off = buildView(pool, new XtreamIds(null), ["UK", "US"], new Set([bbc._key]));
+  const s = off.entries.find((e) => e.tile === bbc).stream;
+  assert.strictEqual(s.tv_archive, 0);
+  assert.strictEqual(s.tv_archive_duration, 0);
+});
+
 test("xmltv helpers", () => {
   assert.strictEqual(xmltvTime(0), "19700101000000 +0000");
   assert.strictEqual(xmlEscape(`a&b<c>"d'\u0001`), "a&amp;b&lt;c&gt;&quot;d&apos;");

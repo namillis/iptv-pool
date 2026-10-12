@@ -240,6 +240,19 @@ test("a failing catch-up lookup returns an empty list", async (t) => {
   assert.deepStrictEqual(body, { epg_listings: [] });
 });
 
+test("a channel whose catch-up probe comes back empty stops being advertised", async (t) => {
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ epg_listings: [] }) });
+  const { base, q, id } = await start(t, { fetchImpl });
+  const sky = id("Sky Sports Main Event");
+  const archived = (streams) => streams.find((s) => s.stream_id === sky)?.tv_archive;
+  assert.strictEqual(archived(await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json()), 1, "advertised before any probe");
+  // A successful but empty probe teaches the pool there's no archive here (restore after the
+  // provider refills is covered by buildView's no-archive unit test; in the router it self-heals
+  // once the 5-minute catch-up cache expires and the next probe returns listings).
+  await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${sky}`);
+  assert.strictEqual(archived(await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json()), 0, "dropped after an empty probe");
+});
+
 test("stream requests are rate limited per login", async (t) => {
   const { get, id } = await start(t);
   const espn = id("ESPN");

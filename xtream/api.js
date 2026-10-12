@@ -82,6 +82,17 @@ function tileCountry(key) {
   return prefix === "CALL" ? "US" : prefix;
 }
 
+/** The persisted set of channels known to return an empty catch-up list; [] on any problem. */
+function loadNoArchive(file) {
+  if (!file) return new Set();
+  try {
+    const raw = JSON.parse(require("fs").readFileSync(file, "utf8"));
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch {
+    return new Set();
+  }
+}
+
 function epgChannelId(epgKey) {
   return epgKey ? epgKey.replace("/", ".") : "";
 }
@@ -101,7 +112,8 @@ function panelTime(ms) {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
-function buildView(pool, ids, countries) {
+function buildView(pool, ids, countries, noArchive) {
+  const empty = noArchive || new Set();
   const wanted = countries.length ? new Set(countries) : null;
   const streamIds = ids.assignStreams(pool.channels);
   const categories = [];
@@ -131,8 +143,8 @@ function buildView(pool, ids, countries) {
       category_id: String(categoryId),
       category_ids: catIds,
       custom_sid: "",
-      tv_archive: tile._catchup ? 1 : 0,
-      tv_archive_duration: tile._catchup ? tile.archiveDays || 1 : 0,
+      tv_archive: tile._catchup && !empty.has(tile._key) ? 1 : 0,
+      tv_archive_duration: tile._catchup && !empty.has(tile._key) ? tile.archiveDays || 1 : 0,
       direct_source: "",
     };
     streams.push({ stream, tile, epgKey });
@@ -248,7 +260,7 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
+function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now, archiveFile = null }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const views = new Map();
@@ -259,6 +271,33 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
   const tableQueue = [];
   let statusPromise = null;
   let statusRefreshedAt = 0;
+
+  // Channels whose catch-up list came back empty from a successful probe: stop advertising
+  // tv_archive for them until a later probe shows listings. Keyed by tile._key, persisted.
+  const noArchive = loadNoArchive(archiveFile);
+  let archiveRev = 0;
+  let archiveTimer = null;
+  function learnArchive(key, hasListings) {
+    const had = noArchive.has(key);
+    if (hasListings && had) noArchive.delete(key);
+    else if (!hasListings && !had) noArchive.add(key);
+    else return;
+    archiveRev++;
+    if (archiveFile && !archiveTimer) {
+      archiveTimer = setTimeout(() => {
+        archiveTimer = null;
+        try {
+          const fs = require("fs");
+          fs.mkdirSync(require("path").dirname(archiveFile), { recursive: true });
+          fs.writeFileSync(`${archiveFile}.tmp`, JSON.stringify([...noArchive]));
+          fs.renameSync(`${archiveFile}.tmp`, archiveFile);
+        } catch (e) {
+          log.error(`[XTREAM] Saving ${archiveFile} failed: ${e.message}`);
+        }
+      }, 5000);
+      archiveTimer.unref?.();
+    }
+  }
 
   function authenticate(req, creds) {
     const src = creds || { ...(req.body || {}), ...req.query };
@@ -288,10 +327,11 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
   function viewFor(pool, user) {
     const profile = user.countries.join(",");
     let view = views.get(profile);
-    if (!view || view.channels !== pool.channels) {
+    if (!view || view.channels !== pool.channels || view.archiveRev !== archiveRev) {
       const start = Date.now();
       const prev = view;
-      view = buildView(pool, ids, user.countries);
+      view = buildView(pool, ids, user.countries, noArchive);
+      view.archiveRev = archiveRev;
       if (prev) view.guide = prev.guide;
       views.set(profile, view);
       log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms`);
@@ -400,6 +440,7 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
         return resp.json();
       });
       const out = { epg_listings: Array.isArray(body?.epg_listings) ? body.epg_listings : [] };
+      learnArchive(tile._key, out.epg_listings.length > 0);
       tables.set(streamId, out);
       return out;
     } catch (e) {
