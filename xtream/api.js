@@ -4,6 +4,8 @@ const zlib = require("zlib");
 const express = require("express");
 const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../siteAuth");
 const { XtreamIds } = require("./ids");
+const { Playback, memberUrl, convertStart } = require("./playback");
+const LRUCache = require("../lruCache");
 
 const COUNTRY_RE = /^[A-Z]{2,3}$/;
 const USERNAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -15,6 +17,16 @@ const EMPTY_LIST_ACTIONS = new Set([
   "get_series",
 ]);
 const EMPTY_OBJECT_ACTIONS = new Set(["get_vod_info", "get_series_info"]);
+const API_PER_MIN = 60;
+const STREAMS_PER_MIN = 30;
+const STATUS_WAIT_MS = 4000;
+const STATUS_REFRESH_MS = 30 * 1000;
+const TABLE_TTL_MS = 5 * 60 * 1000;
+const TABLE_TIMEOUT_MS = 6000;
+const TABLE_CONCURRENCY = 2;
+const LIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
+const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
+const DURATION_RE = /^\d{1,4}$/;
 
 function digest(value) {
   return crypto.createHash("sha256").update(String(value)).digest();
@@ -77,6 +89,7 @@ function buildView(pool, ids, countries) {
   const categories = [];
   const byCategory = new Map();
   const streams = [];
+  const byStreamId = new Map();
   for (const tile of pool.channels) {
     if (wanted && !wanted.has(tileCountry(tile._key))) continue;
     const groups = tile._groups.length ? tile._groups : ["Other"];
@@ -105,6 +118,7 @@ function buildView(pool, ids, countries) {
       direct_source: "",
     };
     streams.push({ stream, tile, epgKey });
+    byStreamId.set(stream.stream_id, tile);
     list.push(stream);
   }
   const gz = (value) => zlib.gzipSync(JSON.stringify(value));
@@ -115,6 +129,7 @@ function buildView(pool, ids, countries) {
     builtAt: Date.now(),
     count: streams.length,
     entries: streams,
+    byStreamId,
     categoriesGz: gz(categories),
     streamsGz: gz(streams.map((s) => s.stream)),
     categoryStreams,
@@ -181,13 +196,20 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
+function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch") }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const views = new Map();
+  const playback = new Playback();
+  const rates = new Map();
+  const tables = new LRUCache({ max: 300, ttl: TABLE_TTL_MS });
+  let tablesInFlight = 0;
+  const tableQueue = [];
+  let statusPromise = null;
+  let statusRefreshedAt = 0;
 
-  function authenticate(req) {
-    const src = { ...(req.body || {}), ...req.query };
+  function authenticate(req, creds) {
+    const src = creds || { ...(req.body || {}), ...req.query };
     const username = typeof src.username === "string" ? src.username : "";
     const password = typeof src.password === "string" ? src.password : "";
     const ip = clientIp(req);
@@ -243,6 +265,123 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
     return view.guideBuild;
   }
 
+  function overLimit(user, kind, limit) {
+    const now = Date.now();
+    const key = `${user.username}:${kind}`;
+    let w = rates.get(key);
+    if (!w || now - w.start >= 60000) rates.set(key, (w = { start: now, count: 0 }));
+    return ++w.count > limit;
+  }
+
+  function tooMany(res) {
+    res.setHeader("Retry-After", "60");
+    return res.status(429).json({ error: "Too many requests" });
+  }
+
+  function refreshStatus(pool) {
+    if (!statusPromise) {
+      statusPromise = pool.accountStatus().finally(() => {
+        statusPromise = null;
+      });
+      statusPromise.catch(() => {});
+    }
+    return statusPromise;
+  }
+
+  async function accountStatus(pool, { fresh = false } = {}) {
+    const cached = pool.accounts;
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (fresh && age > STATUS_REFRESH_MS && Date.now() - statusRefreshedAt > STATUS_REFRESH_MS && !statusPromise) {
+      statusRefreshedAt = Date.now();
+      pool.accounts = null;
+    } else if (cached) {
+      if (age >= 5 * 60 * 1000) refreshStatus(pool);
+      return cached.byId;
+    }
+    const timeout = new Promise((resolve) => setTimeout(resolve, STATUS_WAIT_MS).unref());
+    const got = await Promise.race([refreshStatus(pool).catch(() => null), timeout]);
+    return got || (cached ? cached.byId : null);
+  }
+
+  function xtreamChild(pool, member) {
+    const child = pool.childById.get(member._pid);
+    if (!child || child.providerName !== "xtream") return null;
+    const { xtreamUrl, xtreamUsername, xtreamPassword } = child.config;
+    return { child, base: xtreamUrl, user: xtreamUsername, pass: xtreamPassword, src: String(member._src).replace(/^iptv_live_/, "") };
+  }
+
+  function enc(v) {
+    return encodeURIComponent(v);
+  }
+
+  async function limited(fn) {
+    if (tablesInFlight >= TABLE_CONCURRENCY) await new Promise((r) => tableQueue.push(r));
+    tablesInFlight++;
+    try {
+      return await fn();
+    } finally {
+      tablesInFlight--;
+      const next = tableQueue.shift();
+      if (next) next();
+    }
+  }
+
+  async function dataTable(pool, streamId, tile) {
+    const x = tile._catchup && xtreamChild(pool, tile._catchup);
+    if (!x) return { epg_listings: [] };
+    const cached = tables.get(streamId);
+    if (cached) return cached;
+    const url = `${x.base}/player_api.php?username=${enc(x.user)}&password=${enc(x.pass)}&action=get_simple_data_table&stream_id=${enc(x.src)}`;
+    try {
+      const body = await limited(async () => {
+        const resp = await fetchImpl(url, { timeout: TABLE_TIMEOUT_MS, headers: { "User-Agent": "IPTV pool (catchup)" } });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+      });
+      const out = { epg_listings: Array.isArray(body?.epg_listings) ? body.epg_listings : [] };
+      tables.set(streamId, out);
+      return out;
+    } catch (e) {
+      log.error(`[XTREAM] Catch-up list from ${tile._catchup._pid} failed: ${e.message}`);
+      return { epg_listings: [] };
+    }
+  }
+
+  async function lookup(req, res, creds, streamId) {
+    const auth = authenticate(req, creds);
+    if (auth.locked) {
+      lockedOut(res);
+      return null;
+    }
+    if (!auth.user) {
+      res.status(401).json({ error: "Invalid login" });
+      return null;
+    }
+    if (overLimit(auth.user, "stream", STREAMS_PER_MIN)) {
+      tooMany(res);
+      return null;
+    }
+    let pool;
+    try {
+      pool = await poolFor();
+    } catch (e) {
+      log.error(`[XTREAM] Pool unavailable: ${e.message}`);
+      res.status(503).json({ error: "Pool unavailable" });
+      return null;
+    }
+    const tile = viewFor(pool, auth.user).byStreamId.get(streamId);
+    if (!tile) {
+      res.status(404).json({ error: "Not found" });
+      return null;
+    }
+    return { user: auth.user, pool, tile };
+  }
+
+  function redirect(res, url) {
+    res.setHeader("Location", url);
+    return res.status(302).end();
+  }
+
   function lockedOut(res) {
     res.setHeader("Retry-After", "900");
     return res.status(429).json({ error: "Too many failed attempts. Try again in 15 minutes." });
@@ -260,6 +399,7 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
     if (auth.locked) return lockedOut(res);
     if (!auth.user) return res.json({ user_info: { auth: 0 } });
     const { user, password } = auth;
+    if (overLimit(user, "api", API_PER_MIN)) return tooMany(res);
     const action = String(req.query.action || req.body?.action || "");
 
     if (!action) {
@@ -275,7 +415,7 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
           status: "Active",
           exp_date: null,
           is_trial: "0",
-          active_cons: "0",
+          active_cons: String(playback.activeCount(user.username)),
           created_at: String(user.createdAt),
           max_connections: String(user.maxConnections),
           allowed_output_formats: ["ts", "m3u8"],
@@ -312,7 +452,12 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
       const body = view.categoryStreams.get(String(cat));
       return body ? sendGzip(req, res, body, json) : res.json([]);
     }
-    if (action === "get_simple_data_table" || action === "get_short_epg") return res.json({ epg_listings: [] });
+    if (action === "get_simple_data_table") {
+      const streamId = Number(req.query.stream_id ?? req.body?.stream_id);
+      const tile = view.byStreamId.get(streamId);
+      return res.json(tile ? await dataTable(pool, streamId, tile) : { epg_listings: [] });
+    }
+    if (action === "get_short_epg") return res.json({ epg_listings: [] });
     return res.json([]);
   });
 
@@ -334,6 +479,54 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console }) {
     res.setHeader("Last-Modified", new Date(guide.builtAt).toUTCString());
     if (req.fresh) return res.status(304).end();
     return sendGzip(req, res, guide.body, "application/xml; charset=utf-8");
+  });
+
+  router.get("/live/:u/:p/:file", async (req, res) => {
+    const m = req.params.file.match(LIVE_FILE_RE);
+    if (!m) return res.status(404).json({ error: "Not found" });
+    const streamId = Number(m[1]);
+    const ext = m[2];
+    const found = await lookup(req, res, { username: req.params.u, password: req.params.p }, streamId);
+    if (!found) return;
+    const { user, pool, tile } = found;
+    let status = await accountStatus(pool);
+    if (playback.firstChoiceFull(user, streamId, tile, status)) status = await accountStatus(pool, { fresh: true });
+    const pick = playback.live(user, streamId, tile, ext, status);
+    const url = pick && memberUrl(pick.member, ext);
+    if (!url) return res.status(404).json({ error: "Not found" });
+    log.log(`[XTREAM] ${user.username} live ${streamId} "${tile.name}" -> ${pick.member._pid} (${pick.reason})`);
+    return redirect(res, url);
+  });
+
+  async function archive(req, res, creds, streamId, duration, start, form, ext) {
+    if (!DURATION_RE.test(String(duration))) return res.status(400).json({ error: "Bad duration" });
+    const found = await lookup(req, res, creds, streamId);
+    if (!found) return;
+    const { user, pool, tile } = found;
+    const x = tile._catchup && xtreamChild(pool, tile._catchup);
+    if (!x) return res.status(404).json({ error: "No archive" });
+    const status = await accountStatus(pool);
+    const zone = status?.get(tile._catchup._pid)?.serverTimezone || "UTC";
+    const local = convertStart(start, zone);
+    if (!local) return res.status(400).json({ error: "Bad start" });
+    playback.archive(user, streamId, tile._catchup);
+    log.log(`[XTREAM] ${user.username} archive ${streamId} "${tile.name}" -> ${tile._catchup._pid} (${form}, ${zone})`);
+    if (form === "path")
+      return redirect(res, `${x.base}/timeshift/${enc(x.user)}/${enc(x.pass)}/${duration}/${local}/${enc(x.src)}.${ext}`);
+    return redirect(res, `${x.base}/streaming/timeshift.php?username=${enc(x.user)}&password=${enc(x.pass)}&stream=${enc(x.src)}&start=${enc(local)}&duration=${duration}`);
+  }
+
+  router.get("/timeshift/:u/:p/:dur/:start/:file", (req, res) => {
+    const m = req.params.file.match(ARCHIVE_FILE_RE);
+    if (!m) return res.status(404).json({ error: "Not found" });
+    return archive(req, res, { username: req.params.u, password: req.params.p }, Number(m[1]), req.params.dur, req.params.start, "path", m[2]);
+  });
+
+  router.get("/streaming/timeshift.php", (req, res) => {
+    const q = req.query;
+    const streamId = Number(q.stream);
+    if (!Number.isInteger(streamId)) return res.status(404).json({ error: "Not found" });
+    return archive(req, res, { username: q.username, password: q.password }, streamId, q.duration, q.start, "php", "ts");
   });
 
   router.flush = () => ids.flush();
