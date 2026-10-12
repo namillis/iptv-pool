@@ -418,6 +418,7 @@ In the app, add an Xtream provider with server `https://yourname.duckdns.org` an
 
 - Channel numbers are kept in `xtream-data/xtream-ids.json`, so favourites in the app keep working when the provider lists change. A number is never reused. If a merge-rule change gives a channel a new name key, it keeps its number through the provider streams the two share. Don't delete the file.
 - Categories are listed in provider order, so the first provider's groups come first.
+- **Live Now** comes first when anything is on: the same live and upcoming events as Stremio's Live Now, one channel each ("Bills @ Chiefs", or "Arsenal vs Chelsea · 7:30 PM EDT" before kickoff). Playing one goes through the event's ranked channels in order, with the usual failover, keeping only channels from the login's countries. Its guide entry is the first of those channels that has a guide. Event numbers start at 1,000,000,000, so they never clash with channel numbers. They aren't saved, because events only last a day. The list is rebuilt at most once a minute.
 - Movies and series come back empty.
 
 **Playback.** The server doesn't relay video. A stream request (`/live/...`) gets a redirect to one provider's own stream URL, so the provider sees the TV's IP and the server only answers one small request per channel change. That puts the provider's login in the URL the TV receives, so only give these logins to your own devices.
