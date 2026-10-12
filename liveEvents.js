@@ -220,7 +220,7 @@ const SPORT_TITLE = /\b(football|soccer|f[uú]tbol|basketball|baseball|hockey|te
 // Films like "Love & Basketball" match the sport words, so movie channels never contribute games.
 const MOVIE_CHANNEL = /\b(?:cinemas?|movies?|films?|filmes|pel[ií]culas|cine|showtime|sho|hbo|starz|encore|cinemax|mgm\+?|epix|tcm|amc|ifc|sundance|hallmark|lifetime|bet)\b/i;
 const NOT_LIVE_TITLE = /\b(highlights?|hl|magazine|show|preview|review|countdown|tonight|today|center|centre|report|update|news|talk|daily|plays of the week|inside|recap|rewind|classics?|best of|replay|encore|pre-?game|post-?game|kickoff|studio|analysis|podcast|documentary|30 for 30|debrief|upcoming)\b|\blive\s*$/i;
-const REPLAY_DESC = /\b(relive|highlights|best of|looks? back|replay|rewind|classic|revisit|from earlier|from last)\b/i;
+const REPLAY_DESC = /\b(relive|highlights|best of|looks? back|replay|rewind|classic|revisit|from earlier|from last|revivez|revivre|rediffusion|wiederholung|zusammenfassung|repetici[oó]n|resumen|reviva|reveja)\b/i;
 // Studio shows on event channels ("NFL Gameday Final", "Sunday NFL Countdown", "Inside The NBA"). Matchups are never studio shows.
 const STUDIO_SHOW_RE = /\b(?:highlights?|countdown|pre-?game|post-?game|pre-?kick|studio|halftime|huddle|scoreboard|band performances?|warm-?ups?|recap|primetime|sportscenter|sportsnet central|espn fc|in the crease|coach'?e?s show|college gameday|gameday (?:final|live|kickoff)|nfl live|(?:night|sec|acc|big ten|college) football final)\b|^inside the\b|\b(?:live|today|tonight|center|centre)\s*$/i;
 // A team name, optionally followed by a two-letter state tag as in "Maryville (Mo)".
@@ -229,7 +229,9 @@ const SIDE = "([\\p{Lu}\\p{N}][\\p{L}\\p{N}.'’&/ -]{0,40}?(?:\\s\\(\\p{Lu}\\p{
 const RANK = '(?:[Nn][Oo]\\.?\\s?\\d+\\s+|#\\d+\\s+)?';
 // A period ends the matchup, except in abbreviations like "St. Bonaventure".
 const SIDE_END = '\\s*(?:(?<!\\b(?:St|Mt|Ft))\\.|[,:;(]|\\s[-–]\\s|$)';
-const VERSUS_RE = new RegExp(`^\\s*(?:[Tt]he\\s+)?${RANK}${SIDE}\\s+([Vv][Ss]\\.?|[Vv]\\.?|[Aa][Tt]|@)\\s+(?:[Tt]he\\s+)?${RANK}${SIDE}${SIDE_END}`, 'u');
+const VERSUS_RE = new RegExp(`^\\s*(?:[Tt]he\\s+)?${RANK}${SIDE}\\s+([Vv][Ss]\\.?|[Vv]\\.?|[Aa][Tt]|@|x)\\s+(?:[Tt]he\\s+)?${RANK}${SIDE}${SIDE_END}`, 'u');
+// A guide line that describes the venue ("From Saban Field at Bryant-Denny Stadium") rather than the teams.
+const VENUE_LINE_RE = /^\s*(?:from|live from|desde|depuis|aus|dal|vanuit)\s/i;
 const HOST_RE = new RegExp(`^\\s*(?:the\\s+)?${RANK}${SIDE}\\s+(host|visit|welcome|face|meet|take on)s?\\s+(?:the\\s+)?${RANK}${SIDE}\\s*(?:[.,;(]|\\s(?:at|in|on|for|from)\\s)`, 'iu');
 const MAX_SIDE_WORDS = 5;
 const SPORT_NOUN = '(?:football|soccer|basketball|baseball|hockey|tennis|golf|cricket|rugby|volleyball|softball|lacrosse|darts|snooker|wrestling|boxing|racing|cycling|swimming|athletics|gymnastics|bowling|handball|futsal|motocross|supercross)';
@@ -263,6 +265,7 @@ function validSide(s) {
 function matchupOf(text) {
     if (!text) return null;
     for (const seg of String(text).split(/\s[-–—]\s|:\s/)) {
+        if (VENUE_LINE_RE.test(seg)) continue;
         let m = seg.match(VERSUS_RE);
         if (m) {
             const a = cleanSide(m[1]);
@@ -437,7 +440,7 @@ const GP_NAME_RES = [
     /([\p{L}]+)\s+(?:grand prix|gp)\b/iu,
     /\b(?:grand prix|gran premio|grande pr[eé]mio|gp)\s+(?:(?:de|do|da|del|di|of|von)\s+)?([\p{L}]+)/iu
 ];
-const F1_RE = /\bf1\b|formula (?:1|one)\b/i;
+const F1_RE = /\bf1\b|formula (?:1|one)\b|\bf[oó]rmula 1\b|\bformel 1\b|\bformule 1\b/i;
 const RACE_LIVE_WINDOW_MS = 3 * 3600000;
 const WEEKEND_LEAD_MS = 12 * 3600000;
 const WEEKEND_MS = 4 * 86400000;
@@ -516,6 +519,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
                 const brand = networkBrand(titleCase(networkName(c.name)));
                 if (brand) entry.brands.set(brand, (entry.brands.get(brand) || 0) + 1);
             }
+            entry.text = `${entry.text || ''} ${[p.t, p.st, p.d].filter(Boolean).join(' ')}`;
             if (!entry.sources.includes(src)) entry.sources.push(src);
             for (const l of links) if (!entry.channels.some(c => c.id === l.id)) entry.channels.push(l);
         }
@@ -712,6 +716,142 @@ function programmeVerdict(e, p) {
     return SPORT_TITLE.test(p.t || '') || looksLikeGame(p.t || '') ? 'likely' : 'other';
 }
 
+const NAME_FILLER = new Set(['city', 'united', 'town', 'county', 'club', 'real', 'sporting', 'athletic', 'athletico', 'atletico',
+    'state', 'university', 'college', 'the', 'and', 'los', 'las', 'san', 'new', 'old', 'fc', 'cf', 'sc', 'ac', 'afc', 'de', 'del', 'la', 'le',
+    'mens', 'womens', 'men', 'women', 'jv', 'varsity', 'school', 'high', 'academy', 'champs', 'aaa', 'girls', 'boys',
+    'cricket', 'hockey', 'volleyball', 'football', 'soccer', 'basketball', 'baseball', 'softball', 'lacrosse', 'rugby']);
+const NAMED_MATCHUP_LEAD_MS = 15 * 60000;
+
+function keyWords(name) {
+    return teamWords(name).filter(w => !NAME_FILLER.has(w) && !/^u\d{2}$/.test(w));
+}
+
+function distinctiveWords(name) {
+    return keyWords(name).filter(w => w.length >= 3);
+}
+
+// Same team when one name's words all appear in the other ("Levante" and "Levante Ud", "Sevilla" and "Sevilla FC").
+// A shared city, school or last word alone ("Pacific", "Lutheran", "Winnipeg") isn't enough.
+function sharesName(a, b) {
+    const ka = keyWords(a);
+    const kb = keyWords(b);
+    if (!ka.length || !kb.length) return false;
+    const [short, long] = ka.length <= kb.length ? [ka, new Set(kb)] : [kb, new Set(ka)];
+    return short.every(w => long.has(w));
+}
+
+// Stricter than sameMatchup, which compares only each side's last word ("Idaho State" and "Weber State" match).
+function sameTeams(x, y) {
+    return (sharesName(x[0], y[0]) && sharesName(x[1], y[1])) || (sharesName(x[0], y[1]) && sharesName(x[1], y[0]));
+}
+
+function genderOf(title) {
+    if (/\bwom[ae]n'?s?\b/i.test(title)) return 'w';
+    if (/\bm[ae]n'?s?\b/i.test(title)) return 'm';
+    return null;
+}
+
+function sameGender(a, b) {
+    const ga = genderOf(a);
+    const gb = genderOf(b);
+    return !ga || !gb || ga === gb;
+}
+
+// The sport an event names, without caching it on the event the way categoryOf does.
+function sportNamed(e) {
+    const text = [e.sport, e.league, e.programme, e.title, ...(e.sources || [])].filter(Boolean).join(' | ');
+    if (/^fc\s*-\s/i.test(e.title || '')) return 'Soccer';
+    const hit = CATEGORY_RULES.find(([, re]) => re.test(text));
+    return hit ? hit[0] : null;
+}
+
+function sameSport(a, b) {
+    const sa = sportNamed(a);
+    const sb = sportNamed(b);
+    return !sa || !sb || sa === sb;
+}
+
+function namesSide(words, names) {
+    return names.some(n => distinctiveWords(n).some(w => words.has(w)));
+}
+
+// Two listings of one game under different labels ("Arsenal vs Leeds United", "Arsenal x Leeds") are one event.
+// The one matched to ESPN's schedule is kept, else the first (provider event slots come first).
+function mergeSameMatchups(byKey) {
+    const kept = [];
+    for (const [key, e] of byKey) {
+        if (!e.teams) continue;
+        const i = kept.findIndex(([, o]) => Math.abs(o.start - e.start) <= MERGE_WINDOW_MS && sameTeams(o.teams, e.teams) &&
+            sameGender(o.title, e.title) && sameSport(o, e));
+        if (i === -1) {
+            kept.push([key, e]);
+            continue;
+        }
+        let [keepKey, keep] = kept[i];
+        let drop = e;
+        let dropKey = key;
+        if (e.game && !keep.game) {
+            [keep, drop, keepKey, dropKey] = [e, keep, key, keepKey];
+            kept[i] = [keepKey, keep];
+        }
+        addLinks(keep, drop.channels);
+        keep.end = Math.max(keep.end, drop.end);
+        if (!keep.league && drop.league) keep.league = drop.league;
+        if (!keep.network && drop.network) keep.network = drop.network;
+        if (drop.text) keep.text = `${keep.text || ''} ${drop.text}`;
+        byKey.delete(dropKey);
+    }
+}
+
+// A guide listing named after its league or show ("Monday Night Football · Sky Sports Main Event", "NHL Hockey ·
+// Premier Sports 2") is usually a game that's already listed by its teams. Fold it into that game when its title,
+// subtitle or description names both sides and the game starts while the listing is on.
+function mergeNamedMatchups(byKey) {
+    const games = [...byKey.values()].filter(e => e.teams);
+    if (!games.length) return;
+    for (const [key, e] of byKey) {
+        if (e.teams || !e.fromGuide || !e.text) continue;
+        const words = new Set(teamWords(e.text));
+        let best = null;
+        for (const g of games) {
+            if (g.start < e.start - NAMED_MATCHUP_LEAD_MS || g.start >= e.end) continue;
+            const sides = g.game ? g.game.teams : g.teams.map(t => [t]);
+            if (!sides.every(names => namesSide(words, names)) || !sameGender(g.title, e.text) ||
+                !sameSport(g, { ...e, title: `${e.title} ${e.text}` })) continue;
+            if (!best || Math.abs(g.start - e.start) < Math.abs(best.start - e.start)) best = g;
+        }
+        if (!best) continue;
+        addLinks(best, e.channels);
+        best.end = Math.max(best.end, e.end);
+        byKey.delete(key);
+    }
+}
+
+function broadcastKey(e) {
+    const words = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean).map(w => w.replace(/s$/, ''));
+    return `${words(e.programme || e.title).join(' ')}|${words(e.network).join(' ')}`;
+}
+
+// The same programme on the same network, listed twice because two providers name the channel slightly
+// differently ("TNT Sport 4" and "TNT Sports 4", "Sky Sports Main Event" and "Main Events"), is one event.
+function mergeSameBroadcast(byKey) {
+    const seen = new Map();
+    for (const [key, e] of byKey) {
+        if (e.teams || !e.fromGuide || !e.network) continue;
+        const bk = broadcastKey(e);
+        const first = (seen.get(bk) || []).find(o => Math.abs(o.start - e.start) <= NAMED_MATCHUP_LEAD_MS);
+        if (!first) {
+            if (!seen.has(bk)) seen.set(bk, []);
+            seen.get(bk).push(e);
+            continue;
+        }
+        addLinks(first, e.channels);
+        first.end = Math.max(first.end, e.end);
+        byKey.delete(key);
+    }
+}
+
 function addScheduleNetworks(byKey, games, channels, groupOf, now) {
     const netIndex = buildNetworkIndex(channels, groupOf);
     const dayEnd = dayBounds(now).end;
@@ -784,6 +924,10 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
     }
 }
 
+// Provider event slots also carry talk and studio programmes ("The Pat McAfee Show", "K.C. Keeler Weekly Press
+// Conference", "ACC Network Football Podcast"). Without teams, those aren't events.
+const SLOT_SHOW_RE = /\b(?:press conference|podcast|media day|post[- ]?show|pre[- ]?show|show|talk|open mic)\b|^the\s/i;
+
 function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, races = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
@@ -802,7 +946,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         if (!entry) {
             const { network, title } = splitNetworkPrefix(titleCase(ev.title.replace(NOISE_PARENS, '').trim()));
             const teams = matchupOf(title)?.teams || null;
-            if (!teams && STUDIO_SHOW_RE.test(title)) continue;
+            if (!teams && (STUDIO_SHOW_RE.test(title) || SLOT_SHOW_RE.test(title))) continue;
             entry = {
                 id: 'iptv_ev_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16),
                 title,
@@ -825,10 +969,14 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
     dropGuideReplays(byKey, schedule);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
+    mergeSameMatchups(byKey);
+    mergeNamedMatchups(byKey);
+    mergeSameBroadcast(byKey);
     for (const e of byKey.values()) {
         if (e.game) e.gameTeams = e.game.teams;
         delete e.game;
         delete e.fromGuide;
+        delete e.text;
     }
     const byId = new Map();
     for (const e of byKey.values()) byId.set(e.id, e);
