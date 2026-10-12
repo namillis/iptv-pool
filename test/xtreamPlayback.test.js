@@ -1,0 +1,249 @@
+const test = require("node:test");
+const assert = require("node:assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const express = require("express");
+const { Playback, memberUrl, convertStart } = require("../xtream/playback");
+const { createXtreamRouter } = require("../xtream/api");
+
+function member(pid, src, base = `http://${pid}.example`) {
+  return { _pid: pid, _src: `iptv_live_${src}`, url: `${base}/live/${pid}user/${pid}pass/${src}.m3u8` };
+}
+
+function tile(key, name, members, extra = {}) {
+  return { _key: key, name, logo: null, _members: members, _groups: ["US| SPORTS"], _epg: null, _catchup: extra.catchup || null, archiveDays: extra.archiveDays || 0 };
+}
+
+const user = (username = "tv1", maxConnections = 1) => ({ username, maxConnections });
+const status = (entries) => new Map(Object.entries(entries));
+
+function clock(start = 1_800_000_000_000) {
+  let t = start;
+  const now = () => t;
+  now.advance = (ms) => (t += ms);
+  return now;
+}
+
+test("memberUrl keeps the requested extension for Xtream links and leaves others alone", () => {
+  assert.strictEqual(memberUrl(member("teck", 5), "ts"), "http://teck.example/live/teckuser/teckpass/5.ts");
+  assert.strictEqual(memberUrl({ url: "https://cdn.example/espn/index.m3u8" }, "ts"), "https://cdn.example/espn/index.m3u8");
+  assert.strictEqual(memberUrl({ url: "" }, "ts"), null);
+});
+
+test("convertStart turns a UTC start into the provider's wall time, across DST", () => {
+  assert.strictEqual(convertStart("2026-10-12:20-00", "America/New_York"), "2026-10-12:16-00");
+  assert.strictEqual(convertStart("2026-12-01:20-00", "America/New_York"), "2026-12-01:15-00");
+  assert.strictEqual(convertStart("2026-11-01:05-30", "America/New_York"), "2026-11-01:01-30");
+  assert.strictEqual(convertStart("2026-11-01:06-30", "America/New_York"), "2026-11-01:01-30");
+  assert.strictEqual(convertStart("2026-10-12:23-30", "Europe/London"), "2026-10-13:00-30");
+  assert.strictEqual(convertStart("2026-10-12:20-00", "UTC"), "2026-10-12:20-00");
+  assert.strictEqual(convertStart("2026-10-12:20-00", "Not/AZone"), "2026-10-12:20-00");
+  assert.strictEqual(convertStart("2026-10-12 20:00", "UTC"), null);
+});
+
+test("picks the first member, and skips a provider whose account is full", () => {
+  const pb = new Playback({ now: clock() });
+  const espn = tile("US|ESPN", "ESPN", [member("teck", 1), member("nova", 2)]);
+  assert.strictEqual(pb.live(user(), 10, espn, "ts", null).member._pid, "teck");
+
+  const busy = status({ teck: { maxConnections: 1, activeConnections: 1 } });
+  const pick = new Playback({ now: clock() }).live(user(), 10, espn, "ts", busy);
+  assert.strictEqual(pick.member._pid, "nova");
+  assert.strictEqual(pick.reason, "skipped-busy");
+});
+
+test("a channel switch frees the provider the old channel used", () => {
+  const pb = new Playback({ now: clock() });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const b = tile("US|B", "B", [member("teck", 2), member("nova", 2)]);
+  const teckOne = status({ teck: { maxConnections: 1, activeConnections: 1 } });
+  assert.strictEqual(pb.live(user(), 1, a, "ts", status({ teck: { maxConnections: 1, activeConnections: 0 } })).member._pid, "teck");
+  assert.strictEqual(pb.live(user(), 2, b, "ts", teckOne).member._pid, "teck", "the TV's own stream doesn't count against it");
+  assert.strictEqual(pb.activeCount("tv1"), 1);
+});
+
+test("two TVs on a one-connection provider: the second goes elsewhere", () => {
+  const pb = new Playback({ now: clock() });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const st = status({ teck: { maxConnections: 1, activeConnections: 0 } });
+  assert.strictEqual(pb.live(user("tv1"), 1, a, "ts", st).member._pid, "teck");
+  assert.strictEqual(pb.live(user("tv2"), 1, a, "ts", st).member._pid, "nova");
+});
+
+test("a repeat request within a minute fails over to the next member", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1), member("elite", 1)]);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null).member._pid, "teck");
+  now.advance(5000);
+  const second = pb.live(user(), 1, a, "ts", null);
+  assert.strictEqual(second.member._pid, "nova");
+  assert.strictEqual(second.reason, "failover");
+  now.advance(5000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null).member._pid, "elite");
+  now.advance(5000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null).member._pid, "teck", "all failed: start over");
+});
+
+test("coming back to a channel after a minute is not a failure", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  pb.live(user(), 1, a, "ts", null);
+  now.advance(61000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null).member._pid, "teck");
+});
+
+test("HLS playlist re-fetches stay on the same member", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  pb.live(user(), 1, a, "m3u8", null);
+  for (let i = 0; i < 5; i++) {
+    now.advance(6000);
+    assert.strictEqual(pb.live(user(), 1, a, "m3u8", null).member._pid, "teck");
+  }
+});
+
+test("after a switch on the same provider, LiveWire's quick connection retries keep the same member", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const b = tile("US|B", "B", [member("teck", 2), member("nova", 2)]);
+  pb.live(user(), 1, a, "ts", null);
+  now.advance(30000);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null).member._pid, "teck");
+  now.advance(1500);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null).reason, "settling");
+  now.advance(3000);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null).member._pid, "teck");
+  now.advance(2000);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null).member._pid, "nova", "the user's retry fails over");
+});
+
+test("leases run out after 4 hours", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const st = status({ teck: { maxConnections: 1, activeConnections: 0 } });
+  pb.live(user("tv1"), 1, a, "ts", st);
+  now.advance(4 * 3600 * 1000 + 1);
+  assert.strictEqual(pb.live(user("tv2"), 1, a, "ts", st).member._pid, "teck");
+});
+
+test("everything busy still hands out the first member", () => {
+  const pb = new Playback({ now: clock() });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const full = status({ teck: { maxConnections: 1, activeConnections: 1 }, nova: { maxConnections: 2, activeConnections: 2 } });
+  const pick = pb.live(user(), 1, a, "ts", full);
+  assert.strictEqual(pick.member._pid, "teck");
+  assert.strictEqual(pick.reason, "all-busy");
+});
+
+function fakePool() {
+  const catchup = member("uk1", 77, "http://uk1.example:8080");
+  const channels = [
+    tile("US|ESPN", "ESPN", [member("teck", 1), member("nova", 2)]),
+    tile("UK|SKYSPORTSMAIN", "Sky Sports Main Event", [member("nova", 3), catchup], { catchup, archiveDays: 7 }),
+    tile("US|IPTVORG", "Some FAST channel", [{ _pid: "org", _src: "x", url: "https://cdn.example/fast/index.m3u8" }]),
+  ];
+  const cfg = (pid) => ({ providerName: "xtream", config: { xtreamUrl: `http://${pid}.example${pid === "uk1" ? ":8080" : ""}`, xtreamUsername: `${pid}user`, xtreamPassword: `${pid}pass` } });
+  const pool = {
+    channels,
+    epgData: {},
+    childById: new Map([["teck", cfg("teck")], ["nova", cfg("nova")], ["uk1", cfg("uk1")], ["org", { providerName: "direct", config: {} }]]),
+    accounts: null,
+    statusCalls: 0,
+    async accountStatus() {
+      this.statusCalls++;
+      const byId = new Map([["uk1", { maxConnections: 2, activeConnections: 0, serverTimezone: "Europe/London" }]]);
+      this.accounts = { at: Date.now(), byId };
+      return byId;
+    },
+    updateData: () => Promise.resolve(),
+  };
+  return pool;
+}
+
+async function start(t, { fetchImpl } = {}) {
+  const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-play-"));
+  const usersFile = path.join(dir, "users.json");
+  fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "grapecloverplanet" }] }));
+  const pool = fakePool();
+  const app = express();
+  app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl }));
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const q = "username=tv1&password=grapecloverplanet";
+  const streams = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
+  const id = (name) => streams.find((s) => s.name === name).stream_id;
+  const get = (p) => fetch(base + p, { redirect: "manual" });
+  return { base, q, id, get, pool };
+}
+
+test("live and archive redirects over HTTP", async (t) => {
+  const { base, id, get, q } = await start(t);
+  const espn = id("ESPN");
+  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts`);
+  assert.strictEqual(r.status, 302);
+  assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
+  assert.strictEqual(r.headers.get("cache-control"), "no-store");
+
+  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts`);
+  assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts", "retry fails over");
+
+  r = await get(`/live/tv1/grapecloverplanet/${id("Some FAST channel")}.ts`);
+  assert.strictEqual(r.headers.get("location"), "https://cdn.example/fast/index.m3u8");
+
+  assert.strictEqual((await get(`/live/tv1/wrong-password-x/${espn}.ts`)).status, 401);
+  assert.strictEqual((await get(`/live/tv1/grapecloverplanet/999999.ts`)).status, 404);
+  assert.strictEqual((await get(`/live/tv1/grapecloverplanet/${espn}.mkv`)).status, 404);
+
+  const sky = id("Sky Sports Main Event");
+  r = await get(`/timeshift/tv1/grapecloverplanet/90/2026-10-12:19-00/${sky}.ts`);
+  assert.strictEqual(r.status, 302);
+  assert.strictEqual(r.headers.get("location"), "http://uk1.example:8080/timeshift/uk1user/uk1pass/90/2026-10-12:20-00/77.ts");
+  r = await get(`/streaming/timeshift.php?username=tv1&password=grapecloverplanet&stream=${sky}&start=2026-10-12:19-00&duration=90`);
+  assert.strictEqual(r.headers.get("location"), "http://uk1.example:8080/streaming/timeshift.php?username=uk1user&password=uk1pass&stream=77&start=2026-10-12%3A20-00&duration=90");
+  assert.strictEqual((await get(`/timeshift/tv1/grapecloverplanet/90/2026-10-12:19-00/${espn}.ts`)).status, 404, "no archive");
+  assert.strictEqual((await get(`/timeshift/tv1/grapecloverplanet/abc/2026-10-12:19-00/${sky}.ts`)).status, 400);
+
+  const login = await (await fetch(`${base}/player_api.php?${q}`)).json();
+  assert.strictEqual(login.user_info.active_cons, "1");
+});
+
+test("catch-up listings come from the provider that has the archive, cached", async (t) => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return { ok: true, json: async () => ({ epg_listings: [{ title: "VGVzdA==", start_timestamp: "1", stop_timestamp: "2", has_archive: 1 }] }) };
+  };
+  const { base, q, id } = await start(t, { fetchImpl });
+  const sky = id("Sky Sports Main Event");
+  const body = await (await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${sky}`)).json();
+  assert.strictEqual(body.epg_listings.length, 1);
+  await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${sky}`);
+  assert.strictEqual(calls.length, 1);
+  assert.match(calls[0], /^http:\/\/uk1\.example:8080\/player_api\.php\?username=uk1user&password=uk1pass&action=get_simple_data_table&stream_id=77$/);
+  const none = await (await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${id("ESPN")}`)).json();
+  assert.deepStrictEqual(none, { epg_listings: [] });
+  assert.strictEqual(calls.length, 1);
+});
+
+test("a failing catch-up lookup returns an empty list", async (t) => {
+  const { base, q, id } = await start(t, { fetchImpl: async () => { throw new Error("timeout"); } });
+  const body = await (await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${id("Sky Sports Main Event")}`)).json();
+  assert.deepStrictEqual(body, { epg_listings: [] });
+});
+
+test("stream requests are rate limited per login", async (t) => {
+  const { get, id } = await start(t);
+  const espn = id("ESPN");
+  let last;
+  for (let i = 0; i < 31; i++) last = await get(`/live/tv1/grapecloverplanet/${espn}.m3u8`);
+  assert.strictEqual(last.status, 429);
+});

@@ -418,7 +418,15 @@ In the app, add an Xtream provider with server `https://yourname.duckdns.org` an
 
 - Channel numbers are kept in `xtream-data/xtream-ids.json`, so favourites in the app keep working when the provider lists change. A number is never reused. If a merge-rule change gives a channel a new name key, it keeps its number through the provider streams the two share. Don't delete the file.
 - Categories are listed in provider order, so the first provider's groups come first.
-- Playback isn't served yet, only the channel list and the guide (`player_api.php` and `xmltv.php`). Movies and series come back empty.
+- Movies and series come back empty.
+
+**Playback.** The server doesn't relay video. A stream request (`/live/...`) gets a redirect to one provider's own stream URL, so the provider sees the TV's IP and the server only answers one small request per channel change. That puts the provider's login in the URL the TV receives, so only give these logins to your own devices.
+
+- **Which provider:** providers in `providers.json` order, skipping any whose account looks full. "Full" counts this server's own streams plus the account's connections in use (checked every 5 minutes, sooner when the first choice looks full).
+- **Leases:** each login holds one stream at a time. Changing channel frees the provider the old one used. A login that goes quiet keeps its lease for 4 hours, so a TV turned off mid-stream holds its provider until then.
+- **Failover:** asking for the same channel again within a minute counts as a failure, and the next provider is used. That's what an app's retry does. Right after a channel change on the same provider, the first two quick retries within 10 seconds stay put, because one-connection accounts often refuse the new stream for a moment. HLS (`.m3u8`) requests always stay on the same provider.
+- **Catch-up:** `get_simple_data_table` and both archive URL forms (`/timeshift/...` and `/streaming/timeshift.php`) go to the provider that has the archive. The server reports its time zone as UTC, and archive start times are converted to that provider's own zone.
+- **Limits:** 60 API calls and 30 stream requests per minute per login.
 
 ---
 
