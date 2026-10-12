@@ -473,6 +473,8 @@ async function createPoolAddon(file) {
     const iface = buildInterface(pool, manifest);
     iface.isPool = true;
     iface.poolReport = () => pool.report();
+    iface.pool = pool;
+    iface.touch = () => markUsed(pool);
     return iface;
 }
 

@@ -384,6 +384,42 @@ The key is the only thing protecting your provider logins, so treat that link li
 
 **Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB, and merging adds about 5 MB per 10,000 channels. Providers with large movie and series libraries add more.
 
+### Xtream login for IPTV apps
+
+The pool can also be served as one ordinary Xtream Codes account, so apps like LiveWire, TiviMate or IPTV Smarters see the merged channels and the guide. It's off until a users file exists.
+
+Create `xtream-users.json` next to `providers.json` and `chmod 600` it. Give each TV its own login:
+
+```json
+{ "users": [
+  { "username": "living-room", "password": "<openssl rand -hex 12>", "countries": ["US", "UK"] }
+] }
+```
+
+- `countries` (optional) keeps only channels from those countries. Local US stations count as US, and channels with no country prefix are left out. Without it, every channel is listed.
+- `maxConnections` (optional, default 1) is what the login reports to the app.
+- Passwords need at least 12 characters. The pool's `POOL_KEY` is never accepted here, and 10 failed logins from one IP lock it out for 15 minutes.
+
+Mount it read-only, plus a writable folder for the channel numbers:
+
+```yaml
+    volumes:
+      - ./providers.json:/config/providers.json:ro
+      - ./xtream-users.json:/config/xtream-users.json:ro
+      - ./xtream-data:/data
+```
+
+```
+XTREAM_USERS_FILE=/config/xtream-users.json
+XTREAM_DATA_DIR=/data
+```
+
+In the app, add an Xtream provider with server `https://yourname.duckdns.org` and one of those logins.
+
+- Channel numbers are kept in `xtream-data/xtream-ids.json`, so favourites in the app keep working when the provider lists change. A number is never reused. If a merge-rule change gives a channel a new name key, it keeps its number through the provider streams the two share. Don't delete the file.
+- Categories are listed in provider order, so the first provider's groups come first.
+- Playback isn't served yet, only the channel list and the guide (`player_api.php` and `xmltv.php`). Movies and series come back empty.
+
 ---
 
 ## 🔐 Configuration Tokens
@@ -470,6 +506,8 @@ curl -X POST http://localhost:7000/api/prefetch \
 | `CONFIG_SECRET` | unset | 16+ chars. Config UI encrypts install links with it (AES-256-GCM) |
 | `POOL_KEY` | unset | 16+ letters, digits, `-` or `_`. Turns on the [provider pool](#-provider-pool-several-providers-one-install), installed at `/pool-<POOL_KEY>/manifest.json` |
 | `POOL_FILE` | `./providers.json` | Path to the pool's provider list |
+| `XTREAM_USERS_FILE` | unset | Turns on the [Xtream login](#xtream-login-for-iptv-apps) for IPTV apps when the file exists |
+| `XTREAM_DATA_DIR` | `./xtream-data` | Writable folder for the Xtream channel numbers |
 | `DEBUG_MODE` | `false` | Enables verbose diagnostic logs |
 | `PREFETCH_ENABLED` | `true` | Enable server-side prefetch CORS bypass |
 | `PREFETCH_MAX_BYTES` | `5000000` | Max bytes returned from `/api/prefetch` |
