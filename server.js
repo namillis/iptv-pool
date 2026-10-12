@@ -18,6 +18,8 @@ const { version: APP_VERSION } = require("./package.json");
 const { sitePassword, sitePasswordEnabled } = require("./siteAuth");
 const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
 const { createPoolAddon } = require("./providerPool");
+const { createXtreamRouter } = require("./xtream/api");
+const fs = require("fs");
 const LRUCache = require("./lruCache");
 
 const DEBUG = (process.env.DEBUG_MODE || "").toLowerCase() === "true";
@@ -342,6 +344,27 @@ app.get("/:token/configure-xtream", (req, res) => {
   });
 });
 
+const XTREAM_USERS_FILE = process.env.XTREAM_USERS_FILE || "";
+let xtreamEnabled = false;
+if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
+  try {
+    const dataDir = process.env.XTREAM_DATA_DIR || path.join(__dirname, "xtream-data");
+    const router = createXtreamRouter({
+      usersFile: XTREAM_USERS_FILE,
+      idsFile: path.join(dataDir, "xtream-ids.json"),
+      getPool: poolInterface,
+    });
+    app.use(router);
+    xtreamEnabled = true;
+    const flush = () => router.flush();
+    process.once("SIGTERM", () => { flush(); process.exit(0); });
+    process.once("SIGINT", () => { flush(); process.exit(0); });
+    console.log("[XTREAM] Routes enabled");
+  } catch (e) {
+    console.error(`[XTREAM] Disabled: ${e.message}`);
+  }
+}
+
 // Token interface middleware
 app.use("/:token", async (req, res, next) => {
   const { token } = req.params;
@@ -525,6 +548,6 @@ app.listen(port, () => {
   console.log(
     `🚀 Server running on port ${port} (debug=${DEBUG}, prefetch=${PREFETCH_ENABLED})`,
   );
-  if (POOL_ENABLED)
+  if (POOL_ENABLED || xtreamEnabled)
     poolInterface().catch((e) => console.error("[POOL] Build failed:", e.message));
 });

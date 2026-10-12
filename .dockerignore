@@ -19,3 +19,6 @@ configure.html
 # Keep public assets and source code; don't exclude src/ or public/
 # .well-known is kept (not ignored) for any verification needs
 providers.json
+
+xtream-users.json
+xtream-data

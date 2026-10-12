@@ -46,6 +46,10 @@ function recordFailure(ip, now) {
   if (failures.size > 5000) failures.clear();
 }
 
+function clearFailures(ip) {
+  failures.delete(ip);
+}
+
 function suppliedPassword(req) {
   const header = req.headers.authorization || "";
   const m = header.match(/^Basic\s+(.+)$/i);
@@ -87,4 +91,4 @@ function sitePassword() {
   };
 }
 
-module.exports = { sitePassword, sitePasswordEnabled };
+module.exports = { sitePassword, sitePasswordEnabled, clientIp, isLockedOut, recordFailure, clearFailures };
