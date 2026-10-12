@@ -11,6 +11,14 @@ function memberKey(m) {
   return `${m._pid}/${m._src}`;
 }
 
+/**
+ * The key an app sends back as `source=` to pick one of a channel's streams: the provider id and
+ * the provider's own stream id, which identify the stream without revealing any login.
+ */
+function sourceKey(m) {
+  return `${m._pid}.${String(m._src).replace(/^iptv_live_/, "")}`;
+}
+
 function memberUrl(m, ext) {
   const url = m.url || "";
   const match = url.match(XTREAM_LIVE_RE);
@@ -113,6 +121,18 @@ class Playback {
     const current = acct.leases.find((l) => l.streamId === streamId);
     let failed = false;
 
+    const picked = signal && signal.source ? tile._members.find((m) => sourceKey(m) === signal.source) : null;
+    if (picked) {
+      const replaced = this.replacedLease(acct, user, streamId);
+      acct.leases = acct.leases.filter((l) => l !== replaced);
+      acct.leases.push({
+        streamId, member: picked, key: memberKey(picked), pid: picked._pid, at: now, firstAt: now,
+        repeats: 0, attempt: signal.attempt, settles: false,
+      });
+      this.failed.delete(memberKey(picked));
+      return { member: picked, reason: "picked", skipped: 0 };
+    }
+
     if (current && signal) {
       if (signal.attempt <= current.attempt) {
         current.at = now;
@@ -183,6 +203,27 @@ class Playback {
   }
 
   /**
+   * The streams [tile] can play from, in the order failover tries them, marking the one
+   * [username] is on now and any that failed in the last couple of minutes.
+   */
+  sources(username, streamId, tile, nameOf) {
+    const now = this.now();
+    const lease = this.accounts.get(username)?.leases.find((l) => l.streamId === streamId && now - l.at < LEASE_MS);
+    return tile._members.map((m) => {
+      const label = m._quality ? m._quality.label : "";
+      return {
+        source: sourceKey(m),
+        provider: nameOf(m._pid),
+        name: String(m.name || "").trim(),
+        quality: label.replace(/\s*backup$/i, "").replace(/^Backup$/, ""),
+        backup: /backup/i.test(label),
+        current: !!lease && lease.key === memberKey(m),
+        failed: this.isFailed(memberKey(m), now),
+      };
+    });
+  }
+
+  /**
    * The app stopped playing: drop the login's lease on [streamId] (live or archive), or every
    * lease the login holds when no stream is given. Frees that provider for another TV at once.
    * A lease opened or refreshed in the last [STOP_GRACE_MS] is kept: that's a stop for the
@@ -209,4 +250,4 @@ class Playback {
   }
 }
 
-module.exports = { Playback, memberUrl, convertStart, memberKey, LEASE_MS, REPEAT_MS, FAILED_MS };
+module.exports = { Playback, memberUrl, convertStart, memberKey, sourceKey, LEASE_MS, REPEAT_MS, FAILED_MS };

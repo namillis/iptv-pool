@@ -303,7 +303,7 @@ test("pool_info, pool_stop and the try parameter over HTTP", async (t) => {
   const now = clock(Date.now());
   const { base, q, id, get } = await start(t, { now });
   const info = await (await fetch(`${base}/player_api.php?${q}&action=pool_info`)).json();
-  assert.deepStrictEqual(info, { pool: 1, version: 1, features: ["retry", "stop"] });
+  assert.deepStrictEqual(info, { pool: 1, version: 1, features: ["retry", "stop", "sources"] });
   const bad = await (await fetch(`${base}/player_api.php?username=tv1&password=wrong-pass-123&action=pool_info`)).json();
   assert.deepStrictEqual(bad, { user_info: { auth: 0 } });
 
@@ -324,4 +324,51 @@ test("pool_info, pool_stop and the try parameter over HTTP", async (t) => {
   assert.strictEqual(login.user_info.active_cons, "0");
   assert.strictEqual((await fetch(`${base}/player_api.php?${q}&action=pool_stop&stream_id=abc`)).status, 400);
   assert.deepStrictEqual(await (await fetch(`${base}/player_api.php?${q}&action=pool_stop`)).json(), { ok: 1, released: 0 });
+});
+
+test("a picked source plays that stream, and a later retry fails over from it", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1), member("elite", 1)]);
+  pb.live(user(), 1, a, "ts", null, { attempt: 0, refused: false, source: null });
+  now.advance(5000);
+  const picked = pb.live(user(), 1, a, "ts", null, { attempt: 0, refused: false, source: "elite.1" });
+  assert.strictEqual(picked.member._pid, "elite");
+  assert.strictEqual(picked.reason, "picked");
+  now.advance(5000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, { attempt: 0, refused: false, source: null }).member._pid, "elite", "a reopen stays on the pick");
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, { attempt: 1, refused: false, source: null }).member._pid, "teck", "a retry moves on");
+  const unknown = pb.live(user(), 1, a, "ts", null, { attempt: 0, refused: false, source: "nobody.9" });
+  assert.notStrictEqual(unknown.reason, "picked");
+});
+
+test("sources list the channel's streams in order and mark the current one", () => {
+  const pb = new Playback({ now: clock() });
+  const a = tile("US|A", "A", [
+    { ...member("teck", 1), name: "US - ESPN HD ", _quality: { label: "HD" } },
+    { ...member("nova", 2), name: "US| ESPN [BK]", _quality: { label: "HD backup" } },
+  ]);
+  pb.live(user(), 7, a, "ts", null, { attempt: 0, refused: false, source: "nova.2" });
+  const names = { teck: "Main", nova: "Nova" };
+  assert.deepStrictEqual(pb.sources("tv1", 7, a, (pid) => names[pid]), [
+    { source: "teck.1", provider: "Main", name: "US - ESPN HD", quality: "HD", backup: false, current: false, failed: false },
+    { source: "nova.2", provider: "Nova", name: "US| ESPN [BK]", quality: "HD", backup: true, current: true, failed: false },
+  ]);
+  assert.ok(pb.sources("tv2", 7, a, (pid) => pid).every((s) => !s.current));
+});
+
+test("pool_sources and source= over HTTP", async (t) => {
+  const { base, q, id, get } = await start(t);
+  const espn = id("ESPN");
+  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
+  let body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
+  assert.deepStrictEqual(body.sources.map((s) => [s.source, s.current]), [["teck.1", true], ["nova.2", false]]);
+  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0&source=nova.2`);
+  assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts");
+  body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
+  assert.deepStrictEqual(body.sources.map((s) => s.current), [false, true]);
+  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0&source=../../etc`);
+  assert.strictEqual(r.status, 302, "a malformed source is ignored, not an error");
+  assert.deepStrictEqual(await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=999`)).json(), { sources: [] });
 });
