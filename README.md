@@ -427,6 +427,7 @@ In the app, add an Xtream provider with server `https://yourname.duckdns.org` an
 - **Failover:** asking for the same channel again within a minute counts as a failure, and the next provider is used. That's what an app's retry does. Right after a channel change on the same provider, the first two quick retries within 10 seconds stay put, because one-connection accounts often refuse the new stream for a moment. HLS (`.m3u8`) requests always stay on the same provider.
 - **Catch-up:** `get_simple_data_table` and both archive URL forms (`/timeshift/...` and `/streaming/timeshift.php`) go to the provider that has the archive. The server reports its time zone as UTC, and archive start times are converted to that provider's own zone.
 - **Limits:** 60 API calls and 30 stream requests per minute per login.
+- **App signals (optional):** `player_api.php?action=pool_info` returns `{"pool":1,"version":1,"features":["retry","stop"]}`, so an app can tell the pool from a plain panel. An app that adds `?try=N` to live URLs (0 on open, one more on each retry, plus `&why=refused` for a 401/403/429) gets failover only when N goes up, instead of the one-minute guess. `action=pool_stop&stream_id=N` releases that stream's lease when playback stops, so the provider is free for another TV right away. Apps that send neither keep the default behaviour above.
 
 ---
 

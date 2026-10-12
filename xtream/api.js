@@ -27,6 +27,16 @@ const TABLE_CONCURRENCY = 2;
 const LIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
+const POOL_API_VERSION = 1;
+const POOL_FEATURES = ["retry", "stop"];
+const ATTEMPT_RE = /^\d{1,3}$/;
+
+/** `try=N` (and `why=refused`) on a live URL, from an app that reports its attempts; else null. */
+function playbackSignal(query) {
+  const t = query.try;
+  if (typeof t !== "string" || !ATTEMPT_RE.test(t)) return null;
+  return { attempt: Number(t), refused: query.why === "refused" };
+}
 
 function digest(value) {
   return crypto.createHash("sha256").update(String(value)).digest();
@@ -196,11 +206,11 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch") }) {
+function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const views = new Map();
-  const playback = new Playback();
+  const playback = new Playback({ now });
   const rates = new Map();
   const tables = new LRUCache({ max: 300, ttl: TABLE_TTL_MS });
   let tablesInFlight = 0;
@@ -434,6 +444,15 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
     }
     if (EMPTY_LIST_ACTIONS.has(action)) return res.json([]);
     if (EMPTY_OBJECT_ACTIONS.has(action)) return res.json({});
+    if (action === "pool_info") return res.json({ pool: 1, version: POOL_API_VERSION, features: POOL_FEATURES });
+    if (action === "pool_stop") {
+      const raw = req.query.stream_id ?? req.body?.stream_id;
+      const streamId = raw === undefined || raw === "" ? null : Number(raw);
+      if (streamId !== null && !Number.isInteger(streamId)) return res.status(400).json({ error: "Bad stream_id" });
+      const released = playback.stop(user.username, streamId);
+      if (released) log.log(`[XTREAM] ${user.username} stopped ${streamId ?? "all"} (${released} released)`);
+      return res.json({ ok: 1, released });
+    }
 
     let pool;
     try {
@@ -491,7 +510,7 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
     const { user, pool, tile } = found;
     let status = await accountStatus(pool);
     if (playback.firstChoiceFull(user, streamId, tile, status)) status = await accountStatus(pool, { fresh: true });
-    const pick = playback.live(user, streamId, tile, ext, status);
+    const pick = playback.live(user, streamId, tile, ext, status, playbackSignal(req.query));
     const url = pick && memberUrl(pick.member, ext);
     if (!url) return res.status(404).json({ error: "Not found" });
     log.log(`[XTREAM] ${user.username} live ${streamId} "${tile.name}" -> ${pick.member._pid} (${pick.reason})`);

@@ -3,6 +3,7 @@ const REPEAT_MS = 60 * 1000;
 const FAILED_MS = 2 * 60 * 1000;
 const SETTLE_MS = 10 * 1000;
 const SETTLE_RETRIES = 2;
+const STOP_GRACE_MS = 5 * 1000;
 const XTREAM_LIVE_RE = /^(.*\/live\/[^/]+\/[^/]+\/[^/.]+)\.([A-Za-z0-9]+)$/;
 const START_RE = /^(\d{4})-(\d{2})-(\d{2}):(\d{2})-(\d{2})$/;
 
@@ -99,13 +100,33 @@ class Playback {
     return at !== undefined && now - at < FAILED_MS;
   }
 
-  live(user, streamId, tile, ext, status) {
+  /**
+   * Pick a member for a live request. [signal] is set when the app reports its attempts
+   * (`try=N`, `why=refused`): then a higher attempt number than the lease has seen is a retry and
+   * anything else keeps the leased member, so nothing is guessed from timing. Without it, a repeat
+   * request within a minute counts as a failure, as for any plain Xtream app.
+   */
+  live(user, streamId, tile, ext, status, signal = null) {
     const now = this.now();
     this.prune(now);
     const acct = this.account(user.username);
     const current = acct.leases.find((l) => l.streamId === streamId);
+    let failed = false;
 
-    if (current && now - current.at < REPEAT_MS) {
+    if (current && signal) {
+      if (signal.attempt <= current.attempt) {
+        current.at = now;
+        return { member: current.member, reason: "same" };
+      }
+      current.attempt = signal.attempt;
+      current.repeats++;
+      const settling = signal.refused && current.settles && current.repeats <= SETTLE_RETRIES && now - current.firstAt < SETTLE_MS;
+      if (settling) {
+        current.at = now;
+        return { member: current.member, reason: "settling" };
+      }
+      failed = true;
+    } else if (current && now - current.at < REPEAT_MS) {
       current.repeats++;
       if (ext === "m3u8") {
         current.at = now;
@@ -116,9 +137,10 @@ class Playback {
         current.at = now;
         return { member: current.member, reason: "settling" };
       }
-      this.failed.set(current.key, now);
+      failed = true;
     }
-    const failover = !!(current && now - current.at < REPEAT_MS);
+    if (failed) this.failed.set(current.key, now);
+    const failover = failed;
     const replaced = this.replacedLease(acct, user, streamId);
 
     let member = null;
@@ -152,11 +174,28 @@ class Playback {
       at: now,
       firstAt: now,
       repeats: 0,
+      attempt: signal ? signal.attempt : 0,
       settles: !failover && !!replaced && replaced.streamId !== streamId && replaced.pid === member._pid,
     };
     acct.leases = acct.leases.filter((l) => l !== replaced);
     acct.leases.push(lease);
     return { member, reason, skipped };
+  }
+
+  /**
+   * The app stopped playing: drop the login's lease on [streamId] (live or archive), or every
+   * lease the login holds when no stream is given. Frees that provider for another TV at once.
+   * A lease opened or refreshed in the last [STOP_GRACE_MS] is kept: that's a stop for the
+   * previous session (a Guide preview, say) racing the new request for the same channel.
+   */
+  stop(username, streamId = null) {
+    const acct = this.accounts.get(username);
+    if (!acct) return 0;
+    const now = this.now();
+    const before = acct.leases.length;
+    const matches = (l) => streamId === null || l.streamId === streamId || l.streamId === `archive:${streamId}`;
+    acct.leases = acct.leases.filter((l) => !matches(l) || now - l.at < STOP_GRACE_MS);
+    return before - acct.leases.length;
   }
 
   archive(user, streamId, member) {
