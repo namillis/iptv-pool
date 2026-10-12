@@ -31,14 +31,19 @@ const DURATION_RE = /^\d{1,4}$/;
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
 const POOL_API_VERSION = 1;
-const POOL_FEATURES = ["retry", "stop"];
+const POOL_FEATURES = ["retry", "stop", "sources"];
 const ATTEMPT_RE = /^\d{1,3}$/;
+const SOURCE_RE = /^[a-z0-9]{1,8}\.[A-Za-z0-9_-]{1,40}$/;
 
-/** `try=N` (and `why=refused`) on a live URL, from an app that reports its attempts; else null. */
+/**
+ * `try=N` (and `why=refused`) on a live URL, from an app that reports its attempts, plus
+ * `source=` when the user picked a stream in the app; else null.
+ */
 function playbackSignal(query) {
   const t = query.try;
   if (typeof t !== "string" || !ATTEMPT_RE.test(t)) return null;
-  return { attempt: Number(t), refused: query.why === "refused" };
+  const source = typeof query.source === "string" && SOURCE_RE.test(query.source) ? query.source : null;
+  return { attempt: Number(t), refused: query.why === "refused", source };
 }
 
 function digest(value) {
@@ -519,6 +524,13 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
       if (String(cat) === live.categoryId) return live.eventsGz ? sendGzip(req, res, live.eventsGz, json) : res.json([]);
       const body = view.categoryStreams.get(String(cat));
       return body ? sendGzip(req, res, body, json) : res.json([]);
+    }
+    if (action === "pool_sources") {
+      const streamId = Number(req.query.stream_id ?? req.body?.stream_id);
+      const tile = view.byStreamId.get(streamId) || liveFor(pool, view, user).byStreamId.get(streamId);
+      if (!tile) return res.json({ sources: [] });
+      const nameOf = (pid) => pool.childById.get(pid)?.poolName || pid;
+      return res.json({ sources: playback.sources(user.username, streamId, tile, nameOf) });
     }
     if (action === "get_simple_data_table") {
       const streamId = Number(req.query.stream_id ?? req.body?.stream_id);
