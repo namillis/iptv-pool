@@ -166,13 +166,13 @@ function fakePool() {
   return pool;
 }
 
-async function start(t, { fetchImpl } = {}) {
+async function start(t, { fetchImpl, now } = {}) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-play-"));
   const usersFile = path.join(dir, "users.json");
   fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "grapecloverplanet" }] }));
   const pool = fakePool();
   const app = express();
-  app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl }));
+  app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now }));
   const server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
@@ -246,4 +246,82 @@ test("stream requests are rate limited per login", async (t) => {
   let last;
   for (let i = 0; i < 31; i++) last = await get(`/live/tv1/grapecloverplanet/${espn}.m3u8`);
   assert.strictEqual(last.status, 429);
+});
+
+test("with attempt numbers, only a higher attempt fails over", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1), member("elite", 1)]);
+  const sig = (attempt, refused = false) => ({ attempt, refused });
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, sig(0)).member._pid, "teck");
+  now.advance(2000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, sig(0)).reason, "same", "a reopen at the same attempt is not a failure");
+  now.advance(2000);
+  const retry = pb.live(user(), 1, a, "ts", null, sig(1));
+  assert.strictEqual(retry.member._pid, "nova");
+  assert.strictEqual(retry.reason, "failover");
+  now.advance(2000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, sig(1)).member._pid, "nova", "the same attempt twice fails over once");
+  now.advance(5 * 60 * 1000);
+  assert.strictEqual(pb.live(user(), 1, a, "ts", null, sig(2)).member._pid, "teck", "a retry long after the first play still fails over; teck's failure has expired");
+});
+
+test("with attempt numbers, a refused retry right after a same-provider switch stays put", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const b = tile("US|B", "B", [member("teck", 2), member("nova", 2)]);
+  pb.live(user(), 1, a, "ts", null, { attempt: 0, refused: false });
+  now.advance(30000);
+  pb.live(user(), 2, b, "ts", null, { attempt: 0, refused: false });
+  now.advance(1500);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null, { attempt: 1, refused: true }).reason, "settling");
+  now.advance(3000);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null, { attempt: 2, refused: true }).member._pid, "teck");
+  now.advance(2000);
+  assert.strictEqual(pb.live(user(), 2, b, "ts", null, { attempt: 3, refused: false }).member._pid, "nova", "a plain retry fails over");
+});
+
+test("stop frees the provider for another TV", () => {
+  const now = clock();
+  const pb = new Playback({ now });
+  const a = tile("US|A", "A", [member("teck", 1), member("nova", 1)]);
+  const st = status({ teck: { maxConnections: 1, activeConnections: 0 } });
+  pb.live(user("tv1"), 1, a, "ts", st);
+  assert.strictEqual(pb.stop("tv1", 1), 0, "a stop within 5 s of the request is for the previous session");
+  now.advance(6000);
+  assert.strictEqual(pb.stop("tv1", 99), 0, "another stream id releases nothing");
+  assert.strictEqual(pb.stop("tv1", 1), 1);
+  assert.strictEqual(pb.live(user("tv2"), 1, a, "ts", st).member._pid, "teck");
+  pb.archive(user("tv1"), 5, member("teck", 5));
+  now.advance(6000);
+  assert.strictEqual(pb.stop("tv1", 5), 1, "an archive lease is released by its stream id");
+  assert.strictEqual(pb.stop("nobody"), 0);
+});
+
+test("pool_info, pool_stop and the try parameter over HTTP", async (t) => {
+  const now = clock(Date.now());
+  const { base, q, id, get } = await start(t, { now });
+  const info = await (await fetch(`${base}/player_api.php?${q}&action=pool_info`)).json();
+  assert.deepStrictEqual(info, { pool: 1, version: 1, features: ["retry", "stop"] });
+  const bad = await (await fetch(`${base}/player_api.php?username=tv1&password=wrong-pass-123&action=pool_info`)).json();
+  assert.deepStrictEqual(bad, { user_info: { auth: 0 } });
+
+  const espn = id("ESPN");
+  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
+  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
+  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=1`);
+  assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts");
+
+  let login = await (await fetch(`${base}/player_api.php?${q}`)).json();
+  assert.strictEqual(login.user_info.active_cons, "1");
+  now.advance(6000);
+  const stopped = await (await fetch(`${base}/player_api.php?${q}&action=pool_stop&stream_id=${espn}`)).json();
+  assert.deepStrictEqual(stopped, { ok: 1, released: 1 });
+  login = await (await fetch(`${base}/player_api.php?${q}`)).json();
+  assert.strictEqual(login.user_info.active_cons, "0");
+  assert.strictEqual((await fetch(`${base}/player_api.php?${q}&action=pool_stop&stream_id=abc`)).status, 400);
+  assert.deepStrictEqual(await (await fetch(`${base}/player_api.php?${q}&action=pool_stop`)).json(), { ok: 1, released: 0 });
 });
