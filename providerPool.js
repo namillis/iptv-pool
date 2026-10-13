@@ -1,6 +1,6 @@
 const fs = require('fs');
 const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, markUsed, EVENT_STREAMS_MAX } = require('./addon');
-const { channelKey, streamQuality, displayName, tileId, groupByKey } = require('./channelMerge');
+const { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey } = require('./channelMerge');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 
 const SEP = '~';
@@ -122,12 +122,18 @@ class ProviderPool extends M3UEPGAddon {
         if (!lists) this.taggedLists.set(child, lists = {});
         if (lists[kind]?.src !== src) {
             const pid = child.poolId;
+            const countryOf = new Map();
+            const defaultCountry = (category) => {
+                let c = countryOf.get(category);
+                if (c === undefined) countryOf.set(category, c = categoryCountry(category) || child.poolCountry);
+                return c;
+            };
             lists[kind] = {
                 src,
                 items: src.map(i => {
                     const item = { ...i, id: i.id + SEP + pid, _pid: pid, _src: i.id };
                     if (kind === 'channels') {
-                        item._key = channelKey(i.name, child.poolCountry);
+                        item._key = channelKey(i.name, defaultCountry(this.channelGroup(i)));
                         item._quality = streamQuality(i.name);
                         const epg = M3UEPGAddon.prototype.epgIdOf.call(this, i);
                         item._epgKey = epg ? `${pid}/${epg}` : null;
