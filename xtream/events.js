@@ -66,11 +66,18 @@ function gameDescription(info) {
   return `${parts.join(". ")}.`;
 }
 
-/** A guide or league title without a "Live:" lead-in or the matchup after a colon ("Boxing : A vs. B" is "Boxing"). */
-function programmeName(text) {
+/**
+ * A guide or league title without a "Live:" lead-in or the matchup after a colon: "Boxing : A vs. B" and
+ * "College Football : North Texas at Texas State" are "Boxing" and "College Football". "at" alone isn't
+ * read as a matchup ("Final Round at Pebble Beach"), so it only counts when it joins the event's own teams.
+ */
+function programmeName(text, teams) {
   const t = String(text || "").replace(LIVE_PREFIX_RE, "").trim();
   const m = t.match(/^(.+?)\s*:\s+(.+)$/);
-  return m && MATCHUP_RE.test(` ${m[2]} `) ? m[1] : t;
+  if (!m) return t;
+  const rest = m[2].toLowerCase();
+  const namesTeams = !!teams && teams.length === 2 && teams.every((x) => rest.includes(String(x).toLowerCase()));
+  return MATCHUP_RE.test(` ${m[2]} `) || namesTeams ? m[1] : t;
 }
 
 /**
@@ -91,7 +98,7 @@ function poolEvent(e) {
     description = gameDescription(e.info);
   } else {
     const guide = e.guide || {};
-    const named = [e.league, e.programme, guide.t].map(programmeName).find(Boolean);
+    const named = [e.league, e.programme, guide.t].map((s) => programmeName(s, e.teams)).find(Boolean);
     title = named || category || e.network || "Live event";
     description = guide.d || (guide.st && !e.title.includes(guide.st) ? guide.st : null);
   }

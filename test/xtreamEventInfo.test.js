@@ -147,6 +147,13 @@ test("a slot's guide title gives the sport, without the matchup after the colon"
   assert.strictEqual(poolEvent({ title: "Bundesliga Basketball · Next Level Sports", start: KICKOFF, end: KICKOFF + 3600000, sources: [], programme: "Bundesliga Basketball" }).category, "Basketball");
 });
 
+test("a matchup written with 'at' is dropped from the title only when it names the event's teams", () => {
+  const ev = (teams, t) => poolEvent({ title: "x", teams, start: KICKOFF, end: KICKOFF + 3600000, sources: [], guide: { t } });
+  assert.strictEqual(ev(["North Texas", "Texas State"], "College Football : North Texas at Texas State").title, "College Football");
+  assert.strictEqual(ev(null, "PGA Tour Golf: Final Round at Pebble Beach").title, "PGA Tour Golf: Final Round at Pebble Beach");
+  assert.strictEqual(ev(["Clemson", "Florida State"], "College Softball: ACC Final at Clearwater").title, "College Softball: ACC Final at Clearwater");
+});
+
 test("a league-named listing of a game ESPN shows as finished doesn't come back as its own event", () => {
   const game = (state) => ({
     id: "402",
