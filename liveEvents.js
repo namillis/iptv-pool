@@ -233,6 +233,17 @@ const VERSUS_RE = new RegExp(`^\\s*(?:[Tt]he\\s+)?${RANK}${SIDE}\\s+([Vv][Ss]\\.
 // A guide line that describes the venue ("From Saban Field at Bryant-Denny Stadium") rather than the teams.
 const VENUE_LINE_RE = /^\s*(?:from|live from|desde|depuis|aus|dal|vanuit)\s/i;
 const HOST_RE = new RegExp(`^\\s*(?:the\\s+)?${RANK}${SIDE}\\s+(host|visit|welcome|face|meet|take on)s?\\s+(?:the\\s+)?${RANK}${SIDE}\\s*(?:[.,;(]|\\s(?:at|in|on|for|from)\\s)`, 'iu');
+// "The Rams host the Bills at SoFi Stadium" fits VERSUS_RE as "Rams host the Bills" at "SoFi Stadium".
+const HOST_VERB_RE = /\b(?:host|visit|welcome|face|meet|take on)s?\b/i;
+// A provider's alternate broadcast of a game: an alt-cast, or another language named on its own ("– ESPAÑOL",
+// "(SPANISH)", "EN ESPAÑOL") rather than inside a name ("French River Rapids", "Spanish LaLiga"). It plays after the
+// main broadcast.
+const ALT_CAST_RE = /\b(?:manningcast|megacast|alt(?:ernate)?[- ]?cast)\b/i;
+const ALT_PART_RE = /^(?:(?:en|in)\s+)?(?:espa[ñn]ol|spanish|portugu[eê]s|fran[cç]ais|french|deutsch|german|italiano|esp|alt|alternate)(?:\s+(?:feed|commentary|broadcast|audio))?$/iu;
+
+function isAltFeed(title) {
+    return ALT_CAST_RE.test(title) || String(title).split(/\s[-–—]\s|[()]/).some(part => ALT_PART_RE.test(part.trim()));
+}
 const MAX_SIDE_WORDS = 5;
 const SPORT_NOUN = '(?:football|soccer|basketball|baseball|hockey|tennis|golf|cricket|rugby|volleyball|softball|lacrosse|darts|snooker|wrestling|boxing|racing|cycling|swimming|athletics|gymnastics|bowling|handball|futsal|motocross|supercross)';
 const GAME_END_RE = new RegExp(`\\b(?:${SPORT_NOUN}|league|cup|championship|open|trophy|series|grand prix|tour|games|race|rally|match|derby|bowl|final|semi-?final|playoffs?)\\s*$`, 'i');
@@ -267,7 +278,7 @@ function matchupOf(text) {
     for (const seg of String(text).split(/\s[-–—]\s|:\s/)) {
         if (VENUE_LINE_RE.test(seg)) continue;
         let m = seg.match(VERSUS_RE);
-        if (m) {
+        if (m && !HOST_VERB_RE.test(m[1])) {
             const a = cleanSide(m[1]);
             const b = cleanSide(m[3]);
             if (!validSide(a) || !validSide(b)) continue;
@@ -659,6 +670,21 @@ function applyGame(e, g, now) {
     if (isBareMatchup(e.title)) e.title = g.label;
 }
 
+// A game ESPN lists goes by ESPN's name, whichever provider listing it was first found under ("Manningcast – MNF
+// With Peyton & Eli – Bills @ Rams" is "Buffalo Bills @ Los Angeles Rams"). College team names don't say which sport
+// or which gender, so college leagues other than football add it ("· Women's Volleyball"). A listing whose gender
+// disagrees with the league keeps its own title, and so does a slot that carries several games in a row
+// ("Pittsburgh @ SMU – Racing Santander @ Valencia").
+function scheduleTitle(e, g) {
+    const listed = genderOf(e.title);
+    const league = genderOf(g.sport) || 'm';
+    if (listed && listed !== league) return e.title;
+    if ((e.title.match(/\s(?:@|vs\.?|v\.?|x)\s/gi) || []).length > 1) return e.title;
+    const name = g.name || g.label;
+    if (!/\bcollege\b/i.test(g.sport) || /^college football$/i.test(g.sport)) return name;
+    return `${name} · ${g.sport.replace(/\s*\bcollege\b\s*/i, ' ').trim()}`;
+}
+
 const LEADING_SPORT_RE = /^(?:(?:men'?s|women'?s|mens|womens)\s+)?(?:college\s+)?(?:football|soccer|field hockey|hockey|volleyball|basketball|baseball|softball|lacrosse)\s+/i;
 
 function isBareMatchup(title) {
@@ -963,7 +989,9 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         if (ev.day !== 'assumed') entry.assumedDay = false;
         const src = sourceLabel(group);
         if (!entry.sources.includes(src)) entry.sources.push(src);
-        entry.channels.push({ id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null, kind: 'slot' });
+        const link = { id: c.id, slot: ev.slot, source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null, kind: 'slot' };
+        if (isAltFeed(ev.title)) link.alt = true;
+        entry.channels.push(link);
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
     dropGuideReplays(byKey, schedule);
@@ -973,7 +1001,12 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
     mergeNamedMatchups(byKey);
     mergeSameBroadcast(byKey);
     for (const e of byKey.values()) {
-        if (e.game) e.gameTeams = e.game.teams;
+        if (e.game) {
+            e.gameTeams = e.game.teams;
+            e.title = scheduleTitle(e, e.game);
+            e.start = e.game.start;
+            e.end = Math.max(e.end, e.start + 3600000);
+        }
         delete e.game;
         delete e.fromGuide;
         delete e.text;

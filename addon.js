@@ -508,14 +508,15 @@ class M3UEPGAddon {
     }
 
     // Best first: affiliates and other North American channels whose guide shows the game, the provider's own event
-    // slots, other guide matches, generic sports listings, then channels with no listing. Channels whose guide shows
-    // something else are dropped, and only a few affiliates of one network are kept since they all carry the same
-    // broadcast. Guides are read just after kickoff, because games often run past their scheduled slot.
+    // slots, other guide matches, generic sports listings, then channels with no listing, and alternate broadcasts
+    // (alt-casts, other languages) last. Channels whose guide shows something else are dropped, and only a few
+    // affiliates of one network are kept since they all carry the same broadcast. Guides are read just after kickoff,
+    // because games often run past their scheduled slot.
     rankedEventChannels(e) {
         const at = (e.start + GUIDE_CHECK_OFFSET_MS) / 1000;
         const ranked = [];
         e.channels.forEach((ch, i) => {
-            let tier = 1;
+            let tier = ch.alt ? 7 : 1;
             if (ch.kind !== 'slot') {
                 const item = this.channelById(ch.id);
                 const verdict = programmeVerdict(e, item && this.programmeAt(this.epgIdOf(item), at));

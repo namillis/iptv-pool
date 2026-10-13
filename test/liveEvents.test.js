@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { buildEventIndex, currentEvents } = require("../liveEvents");
+const { parseScoreboard } = require("../espnSchedule");
+const { M3UEPGAddon } = require("../addon");
 
 const NOW = Date.parse("2026-10-12T19:00:00Z");
 const S = (iso) => Math.floor(Date.parse(iso) / 1000);
@@ -114,4 +116,113 @@ test("a Portuguese 'x' matchup is a matchup", () => {
   assert.strictEqual(events.length, 1);
   assert.deepStrictEqual(events[0].teams, ["Las Vegas Raiders", "New England Patriots"]);
   assert.strictEqual(currentEvents(idx, NOW + 20 * 60000).length, 1);
+});
+
+const MNF = Date.parse("2026-10-13T00:15:00Z");
+
+function mnfGame(extra = {}) {
+  return {
+    id: "401",
+    sport: "NFL",
+    importance: 80,
+    start: MNF,
+    teams: [["Buffalo", "Buffalo Bills", "Bills", "BUF"], ["Los Angeles", "Los Angeles Rams", "Rams", "LAR"]],
+    label: "Buffalo Bills @ Los Angeles Rams",
+    name: "Buffalo Bills @ Los Angeles Rams",
+    networks: ["ESPN", "ABC"],
+    state: "in",
+    detail: "",
+    ...extra,
+  };
+}
+
+test("a game ESPN lists takes ESPN's name, and every listing of it joins one event", () => {
+  const idx = index(
+    [
+      slot("mc", "CA - DAZN 05 : MANNINGCAST – MNF WITH PEYTON & ELI – BILLS @ RAMS OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+      slot("e66", "US - ESPN PLUS 66 : BUFFALO BILLS @ LOS ANGELES RAMS OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+      slot("e68", "US - ESPN PLUS 68 : BUFFALO BILLS @ LOS ANGELES RAMS – ESPAÑOL OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+      guideChannel("krdo", "US - ABC 13 COLORADO SPRINGS (KRDO)", "USA LOCALS"),
+    ],
+    {
+      krdo: [{ s: S("2026-10-13T00:15:00Z"), e: S("2026-10-13T03:30:00Z"), t: "Live: NFL Football", d: "The Rams host the Bills at SoFi Stadium. Buffalo lost its previous game to New England 29-17." }],
+    },
+    { now: MNF + 30 * 60000, schedule: [mnfGame()] },
+  );
+  assert.deepStrictEqual(titles(idx), ["Buffalo Bills @ Los Angeles Rams"]);
+  const e = [...idx.values()][0];
+  assert.deepStrictEqual(e.channels.map((c) => c.id).sort(), ["e66", "e68", "krdo", "mc"]);
+  assert.deepStrictEqual(e.channels.filter((c) => c.alt).map((c) => c.id).sort(), ["e68", "mc"]);
+});
+
+test("'X host Y at venue' is Y @ X", () => {
+  const idx = index(
+    [guideChannel("krdo", "US - ABC 13 COLORADO SPRINGS (KRDO)", "USA LOCALS")],
+    { krdo: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T22:00:00Z"), t: "Live: NFL Football", d: "The Rams host the Bills at SoFi Stadium." }] },
+  );
+  const events = [...idx.values()];
+  assert.strictEqual(events.length, 1);
+  assert.deepStrictEqual(events[0].teams, ["Bills", "Rams"]);
+});
+
+test("ESPN names: home first for soccer, the round note, and the sport for college leagues", () => {
+  const team = (displayName, homeAway) => ({ homeAway, team: { displayName, location: displayName } });
+  const board = (away, home, notes = []) => ({
+    events: [{ id: "1", date: "2026-10-12T19:00Z", status: { type: { state: "pre" } }, competitions: [{ notes, competitors: [team(away, "away"), team(home, "home")] }] }],
+  });
+  assert.strictEqual(parseScoreboard(board("Newcastle United", "Coventry City"), "Premier League", 30, { soccer: true })[0].name, "Coventry City vs Newcastle United");
+  assert.strictEqual(parseScoreboard(board("Cleveland Guardians", "Tampa Bay Rays", [{ headline: "ALCS - Game 1" }]), "MLB", 30)[0].name, "Cleveland Guardians @ Tampa Bay Rays · ALCS Game 1");
+
+  const duke = (sport) => ({
+    ...mnfGame({ sport, start: Date.parse("2026-10-12T19:00:00Z"), state: "pre", networks: [] }),
+    teams: [["Duke", "Duke Blue Devils", "Blue Devils", "DUKE"], ["North Carolina", "North Carolina Tar Heels", "Tar Heels", "UNC"]],
+    name: "Duke Blue Devils vs North Carolina Tar Heels",
+  });
+  const listing = [slot("w", "US - ESPN PLUS 10 : Womens Soccer – Duke vs North Carolina 03:00 PM ET (Oct 12)")];
+  assert.deepStrictEqual(titles(index(listing, {}, { schedule: [duke("Women's College Soccer")] })), ["Duke Blue Devils vs North Carolina Tar Heels · Women's Soccer"]);
+  const mismatched = titles(index(listing, {}, { schedule: [duke("Men's College Soccer")] }));
+  assert.ok(/^Womens Soccer/.test(mismatched[0]), mismatched[0]);
+  const doubleBill = [slot("d", "US - ESPN PLUS 11 : Duke @ North Carolina – Racing Santander @ Valencia 03:00 PM ET (Oct 12)")];
+  assert.ok(/Racing Santander/.test(titles(index(doubleBill, {}, { schedule: [duke("College Field Hockey")] }))[0]));
+});
+
+test("an ESPN-listed game uses ESPN's start time", () => {
+  const idx = index(
+    [slot("mc", "CA - DAZN 05 : MANNINGCAST – MNF WITH PEYTON & ELI – BILLS @ RAMS OCT 12 – 8:00 PM ET / OCT 13 – 1:00 AM UK")],
+    {},
+    { now: MNF + 30 * 60000, schedule: [mnfGame()] },
+  );
+  assert.strictEqual([...idx.values()][0].start, MNF);
+});
+
+test("alternate broadcasts play after the main broadcast and foreign guide matches", () => {
+  const flagged = (title) => [...index([slot("x", `US - ESPN PLUS 01 : ${title} 03:00 PM ET (Oct 12)`)]).values()][0].channels[0].alt === true;
+  assert.ok(flagged("Burgos @ Granada – ESPAÑOL"));
+  assert.ok(flagged("Cádiz @ Sporting Gijón (SPANISH)"));
+  assert.ok(flagged("EN ESPAÑOL – Tenerife @ Girona FC"));
+  assert.ok(!flagged("Hockey - Iroquois Falls Storm vs French River Rapids"));
+  assert.ok(!flagged("Rugby - Stade Francais vs Vodacom Bulls"));
+  const programmes = {
+    sky: { s: 0, e: Infinity, t: "NFL", d: "LA Rams play the Buffalo Bills at SoFi Stadium." },
+    krdo: { s: 0, e: Infinity, t: "Live: NFL Football", d: "The Rams host the Bills at SoFi Stadium." },
+  };
+  const pool = {
+    channelById: (id) => ({ id, epg: id }),
+    epgIdOf: (item) => item.epg,
+    programmeAt: (epg) => programmes[epg] || null,
+    channelWeight: () => 1,
+  };
+  const e = {
+    start: MNF,
+    teams: ["Bills", "Rams"],
+    gameTeams: mnfGame().teams,
+    channels: [
+      { id: "mc", slot: "CA - DAZN 05", kind: "slot", alt: true },
+      { id: "e66", slot: "US - ESPN PLUS 66", kind: "slot" },
+      { id: "sky", slot: "UK - SKY SPORTS MAIN EVENT" },
+      { id: "krdo", slot: "US - ABC 13 COLORADO SPRINGS (KRDO)" },
+    ],
+  };
+  const order = M3UEPGAddon.prototype.rankedEventChannels.call(pool, e).map((c) => c.id);
+  assert.deepStrictEqual(order, ["krdo", "e66", "sky", "mc"]);
 });

@@ -118,7 +118,17 @@ function ticketPoints(price) {
     return Math.min(TICKET_MAX, TICKET_WEIGHT * Math.log2(price / TICKET_FLOOR));
 }
 
-function parseScoreboard(json, sport, tier = 0) {
+// "Buffalo Bills @ Los Angeles Rams", or home first for soccer ("Coventry City vs Newcastle United"), plus ESPN's
+// round note when it has one ("ALCS - Game 1" becomes "· ALCS Game 1").
+function gameName(away, home, comp, soccer) {
+    const a = away.team.displayName || away.team.location;
+    const h = home.team.displayName || home.team.location;
+    const note = String(comp?.notes?.[0]?.headline || '').replace(/\s+[-–]\s+/g, ' ').trim();
+    const name = soccer ? `${h} vs ${a}` : `${a} @ ${h}`;
+    return note ? `${name} · ${note}` : name;
+}
+
+function parseScoreboard(json, sport, tier = 0, { soccer = false } = {}) {
     const games = [];
     for (const ev of json?.events || []) {
         const comp = ev.competitions?.[0];
@@ -141,6 +151,7 @@ function parseScoreboard(json, sport, tier = 0) {
             start,
             teams: [teamNames(away.team), teamNames(home.team)],
             label: `${away.team.displayName || away.team.location} @ ${home.team.displayName || home.team.location}`,
+            name: gameName(away, home, comp, soccer),
             networks,
             color: home.team.color || away.team.color || null,
             altColor: home.team.alternateColor || away.team.alternateColor || null,
@@ -214,7 +225,7 @@ async function refresh(now) {
     const dates = [etDate(now - 86400000), etDate(now)];
     const jobs = [];
     for (const [path, sport, tier, query] of LEAGUES) {
-        for (const d of dates) jobs.push({ url: `${BASE_URL}${path}/scoreboard?dates=${d}&limit=500${query ? '&' + query : ''}`, sport, tier });
+        for (const d of dates) jobs.push({ url: `${BASE_URL}${path}/scoreboard?dates=${d}&limit=500${query ? '&' + query : ''}`, sport, tier, soccer: path.startsWith('soccer/') });
     }
     const featured = featuredIds();
     const races = fetchRaces();
@@ -223,7 +234,7 @@ async function refresh(now) {
     let loaded = 0;
     for (let i = 0; i < jobs.length; i += CONCURRENCY) {
         const batch = await Promise.allSettled(
-            jobs.slice(i, i + CONCURRENCY).map(j => fetchJson(j.url).then(json => parseScoreboard(json, j.sport, j.tier)))
+            jobs.slice(i, i + CONCURRENCY).map(j => fetchJson(j.url).then(json => parseScoreboard(json, j.sport, j.tier, { soccer: j.soccer })))
         );
         for (const r of batch) {
             if (r.status !== 'fulfilled') continue;
