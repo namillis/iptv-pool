@@ -50,8 +50,8 @@
 ## 🧪 Quick Start (Local Dev)
 
 ```bash
-git clone https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio.git
-cd M3U-XCAPI-EPG-IPTV-Stremio
+git clone https://git.namillis.me/namillis/iptv-pool.git
+cd iptv-pool
 cp .env.example .env   # create your env (or export vars manually)
 npm install
 npm start
@@ -156,7 +156,7 @@ Install Docker and clone the repo (or your own copy of it):
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker ubuntu   # log out and back in afterwards
 mkdir -p ~/stack/addons && cd ~/stack
-git clone https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio.git addons/iptv
+git clone https://git.namillis.me/namillis/iptv-pool.git addons/iptv
 ```
 
 Create `~/stack/docker-compose.yml`:
@@ -727,7 +727,7 @@ Please include:
 - Sample (sanitized) playlist or line count
 - Logs with `DEBUG_MODE=true` (scrub credentials)
 
-Create an issue: https://git.namillis.me/namillis/M3U-XCAPI-EPG-IPTV-Stremio/issues
+Create an issue: https://git.namillis.me/namillis/iptv-pool/issues
 
 ---
 
