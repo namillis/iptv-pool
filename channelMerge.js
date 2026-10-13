@@ -11,6 +11,15 @@ const NETWORK_RE = /\b(ABC|CBS|NBC|FOX|PBS|CW|ION|METV|TELEMUNDO|UNIVISION|UNIMA
 const CALL_PAREN_RE = /\(([KW][A-Z]{2,3})(?:-(?:TV|DT\d?|LD|CD\d?))?\)/;
 const CALL_BARE_RE = /\b([KW][A-Z]{3})(?:-(?:TV|DT|LD|CD)|\s+TV)\s*$/;
 const CALL_STOPWORDS = new Set(['WEST', 'WEEK', 'WILD', 'WIRE', 'WORK', 'WORLD', 'KIDS', 'KING', 'WOMEN', 'WOW', 'WWE']);
+const CATEGORY_US_RE = /(?:^|[^A-Z])(?:USA|US|UNITED STATES)(?![A-Z])/;
+const CATEGORY_UK_RE = /(?:^|[^A-Z])(?:UK|GB|UNITED KINGDOM|GREAT BRITAIN|GRAN BRETAÑA|ENGLAND|SCOTLAND|WALES|BRITISH)(?![A-Z])/;
+const CATEGORY_NOT_COUNTRY_RE = /BRITISH COLUMBIA|NEW ENGLAND|NEW SOUTH WALES/g;
+const SEPARATOR_RE = /^[^\p{L}\p{N}\s]{2,}.*[^\p{L}\p{N}\s]{2,}$|[#=*]{3,}/u;
+const SLOT_NUMBER_RE = /\s(?:0\d|[1-9]\d{1,2})$/;
+const COUNTRY_WORD_RES = {
+    US: { lead: /^(?:USA|US)(?:[^\p{L}\p{N}\s]+\s*|\s+(?!(?:NETWORK|TODAY|OPEN|NEWS)\b))(?=\S)/u, tail: /\s+(?:USA|US)$/ },
+    UK: { lead: /^(?:UK|GB)[^\p{L}\p{N}\s]+\s*(?=\S)|^UK\s+(?!NEWS\b)(?=\S)/u, tail: /\s+(?:UK|GB)$/ }
+};
 const PLACEHOLDER_RE = /^(?:NOMATCH|NOEVENTS?|NOEVENTSCHEDULED|NOEVENTTODAY|NOLIVEEVENT|OFFAIR|COMINGSOON)$/;
 
 const QUALITY_RULES = [
@@ -65,9 +74,34 @@ function compact(text) {
     return text.replace(/&/g, ' AND ').replace(/\+/g, ' PLUS ').replace(/\b0+(\d)/g, '$1').replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
+/** 'US' or 'UK' when a provider category names exactly one of them ("USA | Entertainment", "UK-Restream"), else ''. */
+function categoryCountry(category) {
+    const text = prepare(category).replace(CATEGORY_NOT_COUNTRY_RE, ' ');
+    const us = CATEGORY_US_RE.test(text);
+    const uk = CATEGORY_UK_RE.test(text);
+    if (us === uk) return '';
+    return us ? 'US' : 'UK';
+}
+
+/** A name with no prefix written like "USA**:BEIN SPORTS 4" or "Blaze UK", without the country word. */
+function stripCountryWord(text, country) {
+    const res = COUNTRY_WORD_RES[country];
+    if (!res) return text;
+    const out = text.replace(res.lead, '').replace(res.tail, '').trim();
+    return out.length >= 2 && !/^(?:TV|HD|SD)$/.test(out) ? out : text;
+}
+
 function channelKey(name, defaultCountry = '') {
-    const { prefix, rest } = splitPrefix(prepare(name));
-    const country = prefix || defaultCountry;
+    const { prefix, rest: text } = splitPrefix(prepare(name));
+    let country = prefix;
+    let rest = text;
+    if (!prefix && defaultCountry && !SEPARATOR_RE.test(text)) {
+        const named = stripCountryWord(text, defaultCountry);
+        if (!SLOT_NUMBER_RE.test(stripTrailing(named))) {
+            country = defaultCountry;
+            rest = named;
+        }
+    }
     if (NORTH_AMERICA.has(country) || !country) {
         const station = stationKey(rest);
         if (station) return station;
@@ -132,4 +166,4 @@ function groupByKey(members, keyOf) {
     return [...byKey.values()];
 }
 
-module.exports = { channelKey, streamQuality, displayName, tileId, groupByKey };
+module.exports = { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey };

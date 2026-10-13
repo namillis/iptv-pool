@@ -317,7 +317,7 @@ The addon itself (`/<token>/manifest.json`, catalogs, streams, logos), `/health`
 
 If you pay for more than one provider, the server can load all of them and serve them as one addon. The logins stay in a file on the server instead of in the install link.
 
-- **Duplicate channels are merged.** `US - ESPN 2 HD ◉`, `US: ESPN 2` and `US| ESPN 2 HD [BK]` become one **US - ESPN 2** tile. Opening it lists a stream from every provider that carries it, best quality first, labeled with the provider and quality (`Main · HD`, `Backup · HD backup`). Channels are matched by country prefix and name, ignoring quality tags (HD, FHD, 4K, HEVC, SD), backup markers, symbols and spacing. Local US stations are matched by call sign, so `ABC 07 NEW YORK NY (WABC)` and `ABC New York WABC TV` merge. Different countries never merge, so `US - ESPN 2` and `LAT - ESPN 2` stay apart. Empty event slots named `NO MATCH` or `NO EVENT` are left out.
+- **Duplicate channels are merged.** `US - ESPN 2 HD ◉`, `US: ESPN 2` and `US| ESPN 2 HD [BK]` become one **US - ESPN 2** tile. Opening it lists a stream from every provider that carries it, best quality first, labeled with the provider and quality (`Main · HD`, `Backup · HD backup`). Channels are matched by country prefix and name, ignoring quality tags (HD, FHD, 4K, HEVC, SD), backup markers, symbols and spacing. Local US stations are matched by call sign, so `ABC 07 NEW YORK NY (WABC)` and `ABC New York WABC TV` merge. Different countries never merge, so `US - ESPN 2` and `LAT - ESPN 2` stay apart. A channel with no prefix takes its country from its category when the category names the US or the UK (`USA | Entertainment`, `UK-Restream`, `PLUTO TV USA`), so `USA ESPN` in `USA | Sports` and `Blaze UK` in `UK-Restream` merge with `US: ESPN` and `UK: Blaze`. Numbered slots like `NHL 11` and separator rows are left out of this, so they never join another provider's slot or a real channel. Empty event slots named `NO MATCH` or `NO EVENT` are left out.
 - Movies and series are not merged yet. Each provider's copy is listed separately and labeled with its provider.
 - **Live Now** and **Today** are built from the merged channels, so a game is one tile and its streams cover every provider that has a matching channel, up to 15. Each channel is listed once before any provider's backup copy.
 - Each provider is fetched, cached and refreshed on its own. If one is down, the others keep working and the failed one is retried every 10 minutes.
@@ -343,7 +343,7 @@ Create `providers.json` next to your compose file and `chmod 600` it:
 
 - `id`: 1-8 lowercase letters or digits. It becomes part of every item ID, so don't change it later or Stremio loses saved items from that provider.
 - `name`: shown on that provider's streams.
-- `country` (optional): a 2-3 letter code, e.g. `"US"`, for providers whose channel names have no country prefix, like the iptv-org lists. Without it, those channels only merge with other unprefixed channels.
+- `country` (optional): a 2-3 letter code, e.g. `"US"`, for providers whose channel names have no country prefix, like the iptv-org lists. A category that names the US or the UK takes priority over it. Without either, those channels only merge with other unprefixed channels.
 - `settings` apply to every provider. A provider can override any of them, along with its own guide fields (`epgUrl`, `epgOffsetHours`, `epgLocalTimes`, `enableEpg`).
 - Xtream providers take `xtreamUrl`, `xtreamUsername`, `xtreamPassword` and optionally `xtreamUseM3U` and `xtreamOutput`. Direct providers take `m3uUrl` and optionally `epgUrl`. The guide is on by default.
 
@@ -396,7 +396,7 @@ Create `xtream-users.json` next to `providers.json` and `chmod 600` it. Give eac
 ] }
 ```
 
-- `countries` (optional) keeps only channels from those countries. Local US stations count as US, and channels with no country prefix are left out. Without it, every channel is listed.
+- `countries` (optional) keeps only channels from those countries. Local US stations count as US, a channel with no prefix counts as the country its category names, and channels with no country either way are left out. Without it, every channel is listed.
 - `maxConnections` (optional, default 1) is what the login reports to the app.
 - Passwords need at least 12 characters. The pool's `POOL_KEY` is never accepted here, and 10 failed logins from one IP lock it out for 15 minutes.
 
