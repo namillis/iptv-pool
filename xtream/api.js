@@ -31,7 +31,7 @@ const DURATION_RE = /^\d{1,4}$/;
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
 const POOL_API_VERSION = 1;
-const POOL_FEATURES = ["retry", "stop", "sources"];
+const POOL_FEATURES = ["retry", "stop", "sources", "event_info"];
 const ATTEMPT_RE = /^\d{1,3}$/;
 const SOURCE_RE = /^[a-z0-9]{1,8}\.[A-Za-z0-9_-]{1,40}$/;
 

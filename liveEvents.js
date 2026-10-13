@@ -506,6 +506,14 @@ function isRaceReplay(p, start, races) {
     return !(named.length ? named : races).some(r => raceWeekendCovers(r, start));
 }
 
+// The guide programme an event was found in, for its description.
+function guideListing(p) {
+    const out = { t: p.t || '' };
+    if (p.st) out.st = p.st;
+    if (p.d) out.d = p.d;
+    return out;
+}
+
 function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
     for (const [epgId, list] of Object.entries(epgData || {})) {
         const chans = channelsByEpgId.get(epgId);
@@ -526,6 +534,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
                 if (!target.sources.includes(src)) target.sources.push(src);
                 for (const l of links) if (!target.channels.some(c => c.id === l.id)) target.channels.push(l);
                 if (!target.league && g.league) target.league = g.league;
+                if (!target.guide) target.guide = guideListing(p);
                 continue;
             }
             const descSig = (p.st || p.d || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -546,6 +555,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
                     end,
                     assumedDay: false,
                     fromGuide: true,
+                    guide: guideListing(p),
                     sources: [],
                     channels: []
                 };
@@ -851,6 +861,7 @@ function mergeSameMatchups(byKey) {
         keep.end = Math.max(keep.end, drop.end);
         if (!keep.league && drop.league) keep.league = drop.league;
         if (!keep.network && drop.network) keep.network = drop.network;
+        if (!keep.guide && drop.guide) keep.guide = drop.guide;
         if (drop.text) keep.text = `${keep.text || ''} ${drop.text}`;
         byKey.delete(dropKey);
     }
@@ -876,6 +887,7 @@ function mergeNamedMatchups(byKey) {
         if (!best) continue;
         addLinks(best, e.channels);
         best.end = Math.max(best.end, e.end);
+        if (!best.guide && e.guide) best.guide = e.guide;
         byKey.delete(key);
     }
 }
@@ -901,6 +913,7 @@ function mergeSameBroadcast(byKey) {
         }
         addLinks(first, e.channels);
         first.end = Math.max(first.end, e.end);
+        if (!first.guide && e.guide) first.guide = e.guide;
         byKey.delete(key);
     }
 }
@@ -914,32 +927,27 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
         const first = byGame.get(e.game);
         if (!first) { byGame.set(e.game, e); continue; }
         addLinks(first, e.channels);
+        if (!first.guide && e.guide) first.guide = e.guide;
         byKey.delete(key);
     }
+    const finished = [];
     for (const g of games) {
-        if (g.state === 'post') continue;
         if (g.start >= dayEnd || (g.state !== 'in' && g.start < now - SCHEDULE_BEFORE_MS)) continue;
+        if (g.state === 'post') {
+            finished.push(g);
+            continue;
+        }
         const nets = [...new Set(g.networks.map(networkFor).filter(Boolean))];
         const links = [];
-        const exact = [];
-        for (const n of nets) {
+        const exact = exactNetworks(g, games);
+        for (const n of exact) {
             const found = netIndex.get(n);
-            const regional = isRegional(g, n, games);
-            if (regional) continue;
-            exact.push(n);
             if (!found) continue;
             links.push(...found.all);
             if (/college football/i.test(g.sport)) links.push(...found.mirrors);
         }
         let target = byGame.get(g) || null;
-        const generic = [];
-        for (const [key, e] of byKey) {
-            if (e.teams || !e.programme || !e.network) continue;
-            if (Math.abs(e.start - g.start) > GENERIC_MATCH_MS || !sportCompatible(g.sport, e.programme)) continue;
-            const net = e.network.toUpperCase();
-            const northAmerican = e.channels.some(c => NORTH_AMERICA_CHANNEL_RE.test(c.slot));
-            if ((northAmerican && exact.some(n => n.re.test(net))) || e.channels.some(c => exact.includes(channelNetwork(c.slot)))) generic.push([key, e]);
-        }
+        const generic = genericListings(byKey, g, exact);
         const espnNetworks = g.networks.filter(networkFor).slice(0, 2).join(' · ');
         if (!target && generic.length) {
             const [, e] = generic.shift();
@@ -952,6 +960,7 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
         }
         for (const [key, e] of generic) {
             addLinks(target, e.channels);
+            if (!target.guide && e.guide) target.guide = e.guide;
             byKey.delete(key);
         }
         if (!target) {
@@ -975,6 +984,29 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
         keepListedNetworks(target, nets);
         byGame.set(g, target);
     }
+    // A listing named after its league ("College Football · SEC Network") that is a game ESPN shows as finished is
+    // over too. Left alone, it would come back as its own event once the game stops absorbing it.
+    for (const g of finished) {
+        for (const [key] of genericListings(byKey, g, exactNetworks(g, games))) byKey.delete(key);
+    }
+}
+
+// The networks ESPN lists for a game, without ones that carry other games in other regions at the same time.
+function exactNetworks(g, games) {
+    return [...new Set(g.networks.map(networkFor).filter(Boolean))].filter(n => !isRegional(g, n, games));
+}
+
+// Listings without teams, named after the game's league, on one of its networks, starting with it.
+function genericListings(byKey, g, exact) {
+    const out = [];
+    for (const [key, e] of byKey) {
+        if (e.teams || !e.programme || !e.network) continue;
+        if (Math.abs(e.start - g.start) > GENERIC_MATCH_MS || !sportCompatible(g.sport, e.programme)) continue;
+        const net = e.network.toUpperCase();
+        const northAmerican = e.channels.some(c => NORTH_AMERICA_CHANNEL_RE.test(c.slot));
+        if ((northAmerican && exact.some(n => n.re.test(net))) || e.channels.some(c => exact.includes(channelNetwork(c.slot)))) out.push([key, e]);
+    }
+    return out;
 }
 
 // Provider event slots also carry talk and studio programmes ("The Pat McAfee Show", "K.C. Keeler Weekly Press
@@ -1030,6 +1062,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
     for (const e of byKey.values()) {
         if (e.game) {
             e.gameTeams = e.game.teams;
+            e.info = { league: e.game.sport, ...(e.game.info || {}) };
             e.title = scheduleTitle(e, e.game);
             e.start = e.game.start;
             e.end = Math.max(e.end, e.start + 3600000);
@@ -1056,6 +1089,9 @@ const SPORT_CATEGORIES = ['Football', 'Basketball', 'Baseball', 'Hockey', 'Socce
 const CATEGORY_RULES = [
     ['Field Hockey', /field hockey/i],
     ['Horse Racing', /horse|thoroughbred|breeders|keeneland|racecourse|raceday|\bracing tv\b/i],
+    // Before soccer, which claims "fútbol" and "Bundesliga": "Fútbol Americano NFL", "Bundesliga Basketball".
+    ['Football', /f[uú]tbol americano/i],
+    ['Basketball', /basketball|baloncesto/i],
     ['Soccer', /soccer|f[uú]tbol|futsal|premier league|\befl\b|la ?liga|serie a|bundesliga|ligue 1|eredivisie|\bmls\b|\bnwsl\b|concacaf|uefa|fifa|champions league|europa league|nations league|copa\b|live football|liga mx|primera divisi/i],
     ['Football', /football|\bnfl\b|\bncaaf\b|\bcfl\b/i],
     ['Basketball', /basketball|baloncesto|\bnba\b|\bwnba\b|\bncaab\b/i],
@@ -1079,7 +1115,9 @@ const FC_SIDE = /(?:^|\s)fc$|^fc\s/i;
 
 function categoryOf(e) {
     if (e.category !== undefined) return e.category;
-    const text = [e.sport, e.league, e.programme, e.title, ...(e.sources || [])].filter(Boolean).join(' | ');
+    // An event slot's guide listing often names the sport when its title doesn't ("Boxing : Regis Prograis vs. Joseph
+    // Diaz Jr."). ESPN's sport is better when there is one, so the listing is only read without it.
+    const text = [e.sport, e.league, e.programme, e.title, e.sport ? null : e.guide?.t, ...(e.sources || [])].filter(Boolean).join(' | ');
     const hit = CATEGORY_RULES.find(([, re]) => re.test(text));
     if (hit) e.category = hit[0];
     else e.category = matchupOf(e.title)?.teams.some(t => FC_SIDE.test(t)) ? 'Soccer' : null;

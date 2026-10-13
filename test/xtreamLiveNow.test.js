@@ -108,6 +108,10 @@ test("Live Now is the first category and plays through the event's channels", as
   assert.ok(all.some((s) => s.name === "ESPN"), "the normal channels follow");
   const live = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${cats[0].category_id}`)).json();
   assert.strictEqual(live.length, 2);
+  assert.deepStrictEqual(live[0].pool_event, { title: "Football", category: "Football", start: (NOW - HOUR) / 1000, end: (NOW + 2 * HOUR) / 1000 });
+  assert.strictEqual(all.find((s) => s.name === "ESPN").pool_event, undefined, "ordinary channels have no pool_event");
+  const info = await (await fetch(`${base}/player_api.php?${q}&action=pool_info`)).json();
+  assert.ok(info.features.includes("event_info"));
 
   const id = live[0].stream_id;
   const go = (n) => fetch(`${base}/live/tv1/grapecloverplanet/${id}.ts?try=${n}`, { redirect: "manual" });
