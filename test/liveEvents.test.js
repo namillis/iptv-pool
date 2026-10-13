@@ -287,3 +287,81 @@ test("two guides an hour apart for one match are one event", () => {
   assert.strictEqual(idx.size, 1, titles(idx).join(" | "));
   assert.strictEqual([...idx.values()][0].channels.length, 2);
 });
+
+test("a sport-only listing of a game on the same channel at the same time is the same broadcast", () => {
+  const idx = index(
+    [guideChannel("dz", "DAZN Ringside", "PLUTO TV USA")],
+    {
+      dz: [
+        { s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Boxing : Jose Resendiz vs. Jaime Munguia", d: "All the boxing action." },
+        { s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Boxing", d: "All the boxing action." },
+      ],
+    },
+  );
+  assert.deepStrictEqual(titles(idx), ["Jose Resendiz vs Jaime Munguia"]);
+});
+
+test("NFL listings naming an earlier week than ESPN's are replays", () => {
+  const sky = (d) => index(
+    [guideChannel("sky", "UK - SKY SPORTS ACTION")],
+    { sky: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "NFL Football", d }] },
+    { schedule: [mnfGame({ start: Date.parse("2026-10-13T00:15:00Z"), state: "pre", info: { round: "Week 5" } })] },
+  );
+  assert.deepStrictEqual(titles(sky("A week four match-up from the 2026 NFL.")), []);
+  assert.deepStrictEqual(titles(sky("The NFL touches down in London with a week 4 clash at the Tottenham Hotspur Stadium.")), []);
+  assert.deepStrictEqual(titles(sky("Live coverage of a week five match-up from the 2026 NFL.")), ["NFL Football · Sky Sports Action"]);
+  assert.deepStrictEqual(titles(sky("Live NFL coverage.")), ["NFL Football · Sky Sports Action"], "no week named");
+});
+
+test("listings named after a past year, ending in a production year, or an encore are replays", () => {
+  const one = (p) => titles(index([guideChannel("c", "US - ACC NETWORK")], { c: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T22:00:00Z"), ...p }] }));
+  assert.deepStrictEqual(one({ t: "2022 Softball Championship -- Clemson vs. Florida State", d: "The Tigers and Seminoles go down the wire." }), []);
+  assert.deepStrictEqual(one({ t: "ICC World T20I 2024 - India vs Bangladesh-T20 Cricket", d: "" }), []);
+  assert.deepStrictEqual(one({ t: "Fight Sports: World Class Championship Boxing", d: "Boxing action. 2012" }), []);
+  assert.deepStrictEqual(one({ t: "Origin Sports: College Football", d: "From Nov. 09, 2002." }), []);
+  assert.deepStrictEqual(one({ t: "Liverpool Football", d: "An encore presentation of Liverpool's on-field action from the past week." }), []);
+  assert.strictEqual(one({ t: "UEFA Champions League 2026-27 - FC Porto x Man City", d: "" }).length, 1, "a season range is current");
+  assert.strictEqual(one({ t: "Rolex Shanghai Masters 2026 Tennis", d: "From Qizhong Forest Sports City Arena." }).length, 1);
+  assert.strictEqual(one({ t: "Snooker: China Open", d: "Coverage from Taiyuan. The 2019 final went to the last frame." }).length, 1, "a year inside a description is history");
+});
+
+test("'come face to face' isn't a matchup, and ESPN+ studio slots are dropped", () => {
+  const vh1 = index(
+    [guideChannel("vh1", "US - VH1 EAST", "ENTERTAINMENT")],
+    { vh1: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Basketball Wives", d: "Malaysia and Jackie come face to face; Liza is encouraged to move on." }] },
+  );
+  assert.deepStrictEqual(titles(vh1), []);
+  const slots = index([
+    slot("a", "US - ESPN PLUS 62 : MNF Playbook Kickoff 08:00 PM ET (Oct 12)"),
+    slot("b", "US - ESPN PLUS 65 : SEC In 60 08:00 PM ET (Oct 12)"),
+    slot("c", "US - HBO MAX 02 : MLB Lead Off – Episode 30 07:30 PM ET (Oct 12)"),
+  ]);
+  assert.deepStrictEqual(titles(slots), []);
+});
+
+test("a guide that double-books a slot with two sports keeps both", () => {
+  const idx = index(
+    [guideChannel("ie", "UK: PREMIER SPORTS 2 IRELAND")],
+    {
+      ie: [
+        { s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T22:00:00Z"), t: "NASCAR O'Reilly Series", d: "The Blue Cross NC 300 from Charlotte Motor Speedway." },
+        { s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T22:00:00Z"), t: "Elite Ice Hockey League", d: "Glasgow Clan v Guildford Flames." },
+      ],
+    },
+  );
+  assert.deepStrictEqual(titles(idx), ["Glasgow Clan vs Guildford Flames", "NASCAR O'Reilly Series · Premier Sports"]);
+});
+
+test("a game that took in an hour-off feed doesn't swallow what that feed shows at the game's time", () => {
+  const idx = index(
+    [guideChannel("uk", "UK - PREMIER SPORTS 2"), guideChannel("ie", "UK: PREMIER SPORTS 2 IRELAND")],
+    {
+      uk: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T21:00:00Z"), t: "Elite Ice Hockey League", d: "Glasgow Clan v Guildford Flames." }],
+      ie: [
+        { s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T22:00:00Z"), t: "NASCAR O'Reilly Series", d: "The Blue Cross NC 300 from Charlotte Motor Speedway." },
+        { s: S("2026-10-12T20:00:00Z"), e: S("2026-10-12T22:00:00Z"), t: "Elite Ice Hockey League", d: "Glasgow Clan v Guildford Flames." },
+      ],
+    },
+  );
+  assert.deepStrictEqual(titles(idx), ["Glasgow Clan vs Guildford Flames", "NASCAR O'Reilly Series · Premier Sports"]);
+});

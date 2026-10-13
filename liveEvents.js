@@ -220,7 +220,7 @@ const SPORT_TITLE = /\b(football|soccer|f[uú]tbol|basketball|baseball|hockey|te
 // Films like "Love & Basketball" match the sport words, so movie channels never contribute games.
 const MOVIE_CHANNEL = /\b(?:cinemas?|movies?|films?|filmes|pel[ií]culas|cine|showtime|sho|hbo|starz|encore|cinemax|mgm\+?|epix|tcm|amc|ifc|sundance|hallmark|lifetime|bet)\b/i;
 const NOT_LIVE_TITLE = /\b(highlights?|hl|magazine|show|preview|review|countdown|tonight|today|center|centre|report|update|news|talk|daily|plays of the week|inside|recap|rewind|classics?|best of|replay|encore|pre-?game|post-?game|kickoff|studio|analysis|podcast|documentary|30 for 30|debrief|upcoming)\b|\blive\s*$/i;
-const REPLAY_DESC = /\b(relive|highlights|best of|looks? back|replay|rewind|classic|revisit|from earlier|from last|revivez|revivre|rediffusion|wiederholung|zusammenfassung|repetici[oó]n|resumen|reviva|reveja)\b/i;
+const REPLAY_DESC = /\b(relive|highlights|best of|looks? back|replay|rewind|classic|revisit|from earlier|from last|encore presentation|revivez|revivre|rediffusion|wiederholung|zusammenfassung|repetici[oó]n|resumen|reviva|reveja)\b/i;
 // Studio shows on event channels ("NFL Gameday Final", "Sunday NFL Countdown", "Inside The NBA"). Matchups are never studio shows.
 const STUDIO_SHOW_RE = /\b(?:highlights?|countdown|pre-?game|post-?game|pre-?kick|studio|halftime|huddle|scoreboard|band performances?|warm-?ups?|recap|primetime|sportscenter|sportsnet central|espn fc|in the crease|coach'?e?s show|college gameday|gameday (?:final|live|kickoff)|nfl live|(?:night|sec|acc|big ten|college) football final)\b|^inside the\b|\b(?:live|today|tonight|center|centre)\s*$/i;
 // A team name, optionally followed by a two-letter state tag as in "Maryville (Mo)".
@@ -304,6 +304,8 @@ function matchupOf(text) {
             const a = cleanSide(m[1]);
             const b = cleanSide(m[3]);
             if (!validSide(a) || !validSide(b)) continue;
+            // HOST_RE is case-insensitive, so a phrase like "come face to face" fits it. Team names are capitalized.
+            if (/^\p{Ll}/u.test(a) || /^\p{Ll}/u.test(b)) continue;
             const verb = m[2].toLowerCase();
             if (verb === 'host' || verb === 'welcome') return { teams: [b, a], label: `${b} @ ${a}` };
             if (verb === 'visit') return { teams: [a, b], label: `${a} @ ${b}` };
@@ -375,6 +377,39 @@ function dropGuideReplays(byKey, games, history = null) {
 
 const CUP_RE = /\b(?:cup|copa|coupe|pokal|coppa|ta[çc]a|trophy|shield)\b/i;
 
+const WEEK_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen',
+    'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen'];
+const WEEK_RE = new RegExp(`\\bweek\\s+(\\d{1,2}|${WEEK_WORDS.join('|')})\\b`, 'gi');
+const NFL_TEXT_RE = /\bNFL\b/i;
+
+function weekNumber(token) {
+    const n = parseInt(token, 10);
+    return Number.isInteger(n) ? n : WEEK_WORDS.indexOf(token.toLowerCase()) + 1;
+}
+
+// ESPN's current NFL regular-season week, from today's and yesterday's games.
+function currentNflWeek(games) {
+    let week = 0;
+    for (const g of games || []) {
+        const m = g.sport === 'NFL' && String(g.info?.round || '').match(/^Week (\d+)$/);
+        if (m) week = Math.max(week, parseInt(m[1], 10));
+    }
+    return week;
+}
+
+// An NFL listing that names an earlier week than ESPN's current one is a replay ("A week four match-up from the 2026
+// NFL" on Sky Sports Action, in week five), unless the guide marks it live or it's one of today's games.
+function dropPastWeeks(byKey, games) {
+    const week = currentNflWeek(games);
+    if (!week) return;
+    for (const [key, e] of byKey) {
+        if (!e.fromGuide || e.listedLive || !e.text || !NFL_TEXT_RE.test(`${e.title} ${e.text}`)) continue;
+        if (e.teams && findGame(e, games)) continue;
+        const weeks = [...e.text.matchAll(WEEK_RE)].map(m => weekNumber(m[1])).filter(n => n > 0);
+        if (weeks.length && weeks.every(n => n < week)) byKey.delete(key);
+    }
+}
+
 function otherCompetition(e, g) {
     return CUP_RE.test([e.league, e.programme, e.title].filter(Boolean).join(' ')) && !CUP_RE.test(g.sport || '');
 }
@@ -444,13 +479,35 @@ function topBrand(counts) {
 }
 
 function pastYearReplay(desc, now) {
-    const m = String(desc || '').match(/\b(?:from|on|aired|recorded)\s+[A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+((?:19|20)\d{2})\b/);
-    return !!m && parseInt(m[1], 10) < new Date(now).getUTCFullYear();
+    const m = String(desc || '').match(/\b(?:[Ff]rom|[Oo]n|[Aa]ired|[Rr]ecorded)\s+[A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+((?:19|20)\d{2})\b/);
+    return !!m && isPastYear(parseInt(m[1], 10), now);
+}
+
+// Before last year, or last year once this year's seasons are under way, so a January playoff named after the
+// season it closes ("2026 NFL Playoffs" in January 2027) still counts as current.
+function isPastYear(year, now) {
+    const d = new Date(now);
+    const y = d.getUTCFullYear();
+    return year < y - 1 || (year === y - 1 && d.getUTCMonth() >= 3);
+}
+
+// A listing named after a past year ("2022 Softball Championship", "ICC World T20I 2024", "South Africa,
+// 17.11.2022"), or a description that ends in a bare production year ("Boxing action. 2012"). A season range
+// ("2026-27", "2026/2027") is read by the year it ends.
+const TITLE_YEAR_RE = /(?<!\d)((?:19|20)\d{2})(?!\d|\s*[-–/]\s*\d{2})/g;
+const DESC_YEAR_RE = /(?:^|[.!?]\s+)((?:19|20)\d{2})\.?\s*$/;
+
+function pastYearListing(p, now) {
+    for (const text of [p.t, p.st]) {
+        for (const m of String(text || '').matchAll(TITLE_YEAR_RE)) if (isPastYear(parseInt(m[1], 10), now)) return true;
+    }
+    const d = String(p.d || '').match(DESC_YEAR_RE);
+    return !!d && isPastYear(parseInt(d[1], 10), now);
 }
 
 function guideEvent(p, channelLabel, now = Date.now()) {
     if (p.r && !p.l) return null;
-    if (!p.l && pastYearReplay(p.d, now)) return null;
+    if (!p.l && (pastYearReplay(p.d, now) || pastYearListing(p, now))) return null;
     const title = p.t || '';
     const sportCat = SPORT_CATEGORY.test((p.c || []).join(' '));
     const sportTitle = SPORT_TITLE.test(title);
@@ -528,7 +585,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
             if (!g || isRaceReplay(p, start, races)) continue;
             const src = sourceLabel(groupOf(first));
             const network = titleCase(networkName(first.name));
-            const links = chans.map(c => ({ id: c.id, slot: (c.name || '').trim(), source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null }));
+            const links = chans.map(c => ({ id: c.id, slot: (c.name || '').trim(), source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null, at: start }));
             const target = g.teams && slotEvents.find(e => e.teams && Math.abs(e.start - start) <= MERGE_WINDOW_MS && sameMatchup(e.teams, g.teams));
             if (target) {
                 if (!target.sources.includes(src)) target.sources.push(src);
@@ -892,6 +949,26 @@ function mergeNamedMatchups(byKey) {
     }
 }
 
+// A guide that lists one broadcast twice, once by its teams and once by its sport alone ("Boxing : Jose Resendiz vs.
+// Jaime Munguia" and "Boxing" on DAZN Ringside, both at 1:37), gives a second event whose channels are all already in
+// the game. Both listings have to start together on each channel: a game also takes in channels whose guide runs an
+// hour off (an Irish feed), and that channel's listing at the game's time is something else. A guide that double-books
+// a slot with two sports ("NASCAR O'Reilly Series" and "Elite Ice Hockey League") isn't one broadcast either.
+function mergeSameChannel(byKey) {
+    const games = [...byKey.values()].filter(e => e.teams);
+    if (!games.length) return;
+    const sameListing = (c, g) => c.at !== undefined && g.channels.some(o => o.id === c.id && o.at === c.at);
+    for (const [key, e] of byKey) {
+        if (e.teams || !e.fromGuide || !e.channels.length) continue;
+        const game = games.find(g => Math.abs(g.start - e.start) <= NAMED_MATCHUP_LEAD_MS && e.channels.every(c => sameListing(c, g)) &&
+            sameSport(g, { ...e, title: `${e.title} ${e.text || ''}` }));
+        if (!game) continue;
+        game.end = Math.max(game.end, e.end);
+        if (!game.guide && e.guide) game.guide = e.guide;
+        byKey.delete(key);
+    }
+}
+
 function broadcastKey(e) {
     const words = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
         .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean).map(w => w.replace(/s$/, ''));
@@ -1010,8 +1087,9 @@ function genericListings(byKey, g, exact) {
 }
 
 // Provider event slots also carry talk and studio programmes ("The Pat McAfee Show", "K.C. Keeler Weekly Press
-// Conference", "ACC Network Football Podcast"). Without teams, those aren't events.
-const SLOT_SHOW_RE = /\b(?:press conference|podcast|media day|post[- ]?show|pre[- ]?show|show|talk|open mic)\b|^the\s/i;
+// Conference", "ACC Network Football Podcast", "MNF Playbook Kickoff", "SEC In 60", "MLB Lead Off – Episode 30").
+// Without teams, those aren't events.
+const SLOT_SHOW_RE = /\b(?:press conference|podcast|media day|post[- ]?show|pre[- ]?show|show|talk|open mic|kickoff|playbook|in \d{2}|episode \d+)\b|^the\s/i;
 
 function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null } = {}) {
     const byKey = new Map();
@@ -1054,10 +1132,12 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
     dropGuideReplays(byKey, schedule, history);
+    dropPastWeeks(byKey, schedule);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
     mergeSameMatchups(byKey);
     mergeNamedMatchups(byKey);
+    mergeSameChannel(byKey);
     mergeSameBroadcast(byKey);
     for (const e of byKey.values()) {
         if (e.game) {
