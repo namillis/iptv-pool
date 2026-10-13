@@ -143,16 +143,20 @@ test("everything busy still hands out the first member", () => {
 
 function fakePool() {
   const catchup = member("uk1", 77, "http://uk1.example:8080");
+  const cnnNova = { ...member("nova", 4), archive: true };
+  const cnn = [cnnNova, member("teck", 4), { ...member("nova", 40), archive: true }, { ...member("ksenqw", 5), archive: true }];
   const channels = [
     tile("US|ESPN", "ESPN", [member("teck", 1), member("nova", 2)]),
     tile("UK|SKYSPORTSMAIN", "Sky Sports Main Event", [member("nova", 3), catchup], { catchup, archiveDays: 7 }),
     tile("US|IPTVORG", "Some FAST channel", [{ _pid: "org", _src: "x", url: "https://cdn.example/fast/index.m3u8" }]),
+    tile("US|CNN", "CNN", cnn, { catchup: cnnNova, archiveDays: 2 }),
   ];
   const cfg = (pid) => ({ providerName: "xtream", config: { xtreamUrl: `http://${pid}.example${pid === "uk1" ? ":8080" : ""}`, xtreamUsername: `${pid}user`, xtreamPassword: `${pid}pass` } });
   const pool = {
     channels,
     epgData: {},
-    childById: new Map([["teck", cfg("teck")], ["nova", cfg("nova")], ["uk1", cfg("uk1")], ["org", { providerName: "direct", config: {} }]]),
+    childById: new Map([["teck", cfg("teck")], ["nova", cfg("nova")], ["uk1", cfg("uk1")], ["ksenqw", cfg("ksenqw")], ["org", { providerName: "direct", config: {} }]]),
+    catchupEnabledFor: (m) => !!m.archive,
     accounts: null,
     statusCalls: 0,
     async accountStatus() {
@@ -166,13 +170,14 @@ function fakePool() {
   return pool;
 }
 
-async function start(t, { fetchImpl, now } = {}) {
+async function start(t, { fetchImpl, now, archiveFile } = {}) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-play-"));
   const usersFile = path.join(dir, "users.json");
   fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "grapecloverplanet" }] }));
   const pool = fakePool();
   const app = express();
-  app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now }));
+  const router = createXtreamRouter({ usersFile, idsFile: null, archiveFile, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now });
+  app.use(router);
   const server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
@@ -182,7 +187,24 @@ async function start(t, { fetchImpl, now } = {}) {
   const streams = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
   const id = (name) => streams.find((s) => s.name === name).stream_id;
   const get = (p) => fetch(base + p, { redirect: "manual" });
-  return { base, q, id, get, pool };
+  const live = async () => (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
+  const table = async (streamId) => (await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${streamId}`)).json();
+  return { base, q, id, get, pool, live, table, router };
+}
+
+const LISTING = { title: "VGVzdA==", start_timestamp: "1", stop_timestamp: "2", has_archive: 1 };
+
+/** A fake provider API: [lists] maps a provider to its catch-up answer ("empty", "fail" or listings). */
+function tables(lists) {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const pid = new URL(url).hostname.split(".")[0];
+    calls.push(pid);
+    const answer = lists[pid] || "empty";
+    if (answer === "fail") throw new Error("timeout");
+    return { ok: true, json: async () => ({ epg_listings: answer === "empty" ? [] : answer }) };
+  };
+  return { calls, fetchImpl };
 }
 
 test("live and archive redirects over HTTP", async (t) => {
@@ -238,6 +260,58 @@ test("a failing catch-up lookup returns an empty list", async (t) => {
   const { base, q, id } = await start(t, { fetchImpl: async () => { throw new Error("timeout"); } });
   const body = await (await fetch(`${base}/player_api.php?${q}&action=get_simple_data_table&stream_id=${id("Sky Sports Main Event")}`)).json();
   assert.deepStrictEqual(body, { epg_listings: [] });
+});
+
+test("an empty list falls back to the next provider's catch-up, and replays play from it", async (t) => {
+  const { calls, fetchImpl } = tables({ ksenqw: [LISTING] });
+  const { id, get, table } = await start(t, { fetchImpl });
+  const cnn = id("CNN");
+  assert.strictEqual((await table(cnn)).epg_listings.length, 1);
+  assert.deepStrictEqual(calls, ["nova", "ksenqw"], "one stream per provider, and not the one without catch-up");
+  await table(cnn);
+  assert.strictEqual(calls.length, 2, "cached");
+  const r = await get(`/timeshift/tv1/grapecloverplanet/60/2026-10-12:19-00/${cnn}.ts`);
+  assert.strictEqual(r.headers.get("location"), "http://ksenqw.example/timeshift/ksenqwuser/ksenqwpass/60/2026-10-12:19-00/5.ts");
+});
+
+test("a channel with no listings anywhere stops advertising catch-up, and is checked again after 12 hours", async (t) => {
+  const now = clock();
+  const { calls, fetchImpl } = tables({});
+  const { id, live, table } = await start(t, { fetchImpl, now });
+  const cnn = id("CNN");
+  const archived = async () => (await live()).find((s) => s.stream_id === cnn).tv_archive;
+  assert.deepStrictEqual(await table(cnn), { epg_listings: [] });
+  assert.deepStrictEqual(calls, ["nova", "ksenqw"]);
+  assert.strictEqual(await archived(), 1, "the lineup is rebuilt for this at most once a minute");
+  now.advance(61 * 1000);
+  assert.strictEqual(await archived(), 0);
+  now.advance(12 * 3600 * 1000);
+  assert.strictEqual(await archived(), 1);
+});
+
+test("a failed catch-up request hides nothing", async (t) => {
+  const now = clock();
+  const { calls, fetchImpl } = tables({ nova: "fail" });
+  const { id, live, table } = await start(t, { fetchImpl, now });
+  const cnn = id("CNN");
+  assert.deepStrictEqual(await table(cnn), { epg_listings: [] });
+  assert.deepStrictEqual(calls, ["nova", "ksenqw"]);
+  now.advance(61 * 1000);
+  assert.strictEqual((await live()).find((s) => s.stream_id === cnn).tv_archive, 1);
+  await table(cnn);
+  assert.strictEqual(calls.length, 4, "not cached, so the next look tries again");
+});
+
+test("the provider that had listings stays first, and survives a restart", async (t) => {
+  const archiveFile = path.join(fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-archive-")), "archive.json");
+  const first = tables({ ksenqw: [LISTING] });
+  const a = await start(t, { fetchImpl: first.fetchImpl, archiveFile });
+  await a.table(a.id("CNN"));
+  a.router.flush();
+  const again = tables({ ksenqw: [LISTING], nova: [LISTING] });
+  const b = await start(t, { fetchImpl: again.fetchImpl, archiveFile });
+  assert.strictEqual((await b.table(b.id("CNN"))).epg_listings.length, 1);
+  assert.deepStrictEqual(again.calls, ["ksenqw"]);
 });
 
 test("stream requests are rate limited per login", async (t) => {
