@@ -1,7 +1,7 @@
 {
-  "name": "stremio-m3u-epg-addon",
+  "name": "iptv-pool",
   "version": "2.2.0",
-  "description": "Stremio addon for M3U playlists and EPG data with Xtream API support (encrypted configs, LRU/Redis cache)",
+  "description": "IPTV provider pool serving Stremio and LiveWire",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
