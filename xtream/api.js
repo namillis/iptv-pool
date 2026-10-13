@@ -5,7 +5,8 @@ const express = require("express");
 const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../siteAuth");
 const { XtreamIds } = require("./ids");
 const { buildEvents, LIVE_NOW } = require("./events");
-const { Playback, memberUrl, convertStart } = require("./playback");
+const { Playback, memberUrl, convertStart, memberKey } = require("./playback");
+const { ArchiveMemory } = require("./archive");
 const LRUCache = require("../lruCache");
 
 const COUNTRY_RE = /^[A-Z]{2,3}$/;
@@ -25,6 +26,9 @@ const STATUS_REFRESH_MS = 30 * 1000;
 const TABLE_TTL_MS = 5 * 60 * 1000;
 const TABLE_TIMEOUT_MS = 6000;
 const TABLE_CONCURRENCY = 2;
+const TABLE_TRIES = 3;
+const TABLE_BUDGET_MS = 9000;
+const ARCHIVE_REBUILD_MS = 60 * 1000;
 const LIVE_FILE_RE = /^(\d{1,10})\.(ts|m3u8)$/;
 const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
@@ -127,7 +131,7 @@ function loadHome(raw) {
 
 const HOME = loadHome(require("./home.json"));
 
-function buildView(pool, ids, countries, home = HOME) {
+function buildView(pool, ids, countries, home = HOME, noArchive = null) {
   const wanted = countries.length ? new Set(countries) : null;
   const curated = home && (!wanted || wanted.has(home.country)) ? home : null;
   const streamIds = ids.assignStreams(pool.channels);
@@ -147,6 +151,7 @@ function buildView(pool, ids, countries, home = HOME) {
     const categoryId = slot ? homeLists[slot.category].id : catIds[0];
     if (slot) catIds = [categoryId, ...catIds];
     const epgKey = tile._epg && pool.epgData[tile._epg]?.length ? tile._epg : null;
+    const archived = !!tile._catchup && !(noArchive && noArchive.has(tile._key));
     const stream = {
       num: 0,
       name: tile.name,
@@ -159,8 +164,8 @@ function buildView(pool, ids, countries, home = HOME) {
       category_id: String(categoryId),
       category_ids: catIds,
       custom_sid: "",
-      tv_archive: tile._catchup ? 1 : 0,
-      tv_archive_duration: tile._catchup ? tile.archiveDays || 1 : 0,
+      tv_archive: archived ? 1 : 0,
+      tv_archive_duration: archived ? tile.archiveDays || 1 : 0,
       direct_source: "",
     };
     entries.push({ stream, tile, epgKey });
@@ -299,9 +304,10 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
+function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
+  const archives = new ArchiveMemory(archiveFile, { now, log });
   const views = new Map();
   const playback = new Playback({ now });
   const rates = new Map();
@@ -339,10 +345,14 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
   function viewFor(pool, user) {
     const profile = user.countries.join(",");
     let view = views.get(profile);
-    if (!view || view.channels !== pool.channels) {
+    const rev = archives.revision();
+    const archiveStale = view && view.archiveRev !== rev && now() - view.archiveAt >= ARCHIVE_REBUILD_MS;
+    if (!view || view.channels !== pool.channels || archiveStale) {
       const start = Date.now();
       const prev = view;
-      view = buildView(pool, ids, user.countries);
+      view = buildView(pool, ids, user.countries, HOME, archives.hidden());
+      view.archiveRev = rev;
+      view.archiveAt = now();
       if (prev) view.guide = prev.guide;
       views.set(profile, view);
       log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms`);
@@ -438,25 +448,77 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
     }
   }
 
+  /**
+   * A channel's catch-up streams, one per provider: the one that last had listings first, then
+   * the channel's usual catch-up stream, then the other providers' in failover order.
+   */
+  function archiveMembers(pool, tile) {
+    if (!tile._catchup) return [];
+    const hasArchive = (m) => m === tile._catchup || (typeof pool.catchupEnabledFor === "function" && pool.catchupEnabledFor(m));
+    const picked = archives.picked(tile._key);
+    const first = picked && tile._members.find((m) => memberKey(m) === picked && hasArchive(m));
+    const out = [];
+    const seen = new Set();
+    for (const m of [first, tile._catchup, ...tile._members]) {
+      if (!m || seen.has(m._pid) || !hasArchive(m) || !xtreamChild(pool, m)) continue;
+      seen.add(m._pid);
+      out.push(m);
+    }
+    return out;
+  }
+
+  function archiveMember(pool, tile) {
+    return archiveMembers(pool, tile)[0] || null;
+  }
+
+  async function fetchTable(pool, member) {
+    const x = xtreamChild(pool, member);
+    const url = `${x.base}/player_api.php?username=${enc(x.user)}&password=${enc(x.pass)}&action=get_simple_data_table&stream_id=${enc(x.src)}`;
+    const body = await limited(async () => {
+      const resp = await fetchImpl(url, { timeout: TABLE_TIMEOUT_MS, headers: { "User-Agent": "IPTV pool (catchup)" } });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.json();
+    });
+    return Array.isArray(body?.epg_listings) ? body.epg_listings : [];
+  }
+
+  /**
+   * The channel's past listings from the first of its catch-up streams that has any. Archive
+   * playback then uses that stream. When every one answers with an empty list, the channel stops
+   * being advertised with catch-up for a while; a failed request decides nothing.
+   */
   async function dataTable(pool, streamId, tile) {
-    const x = tile._catchup && xtreamChild(pool, tile._catchup);
-    if (!x) return { epg_listings: [] };
     const cached = tables.get(streamId);
     if (cached) return cached;
-    const url = `${x.base}/player_api.php?username=${enc(x.user)}&password=${enc(x.pass)}&action=get_simple_data_table&stream_id=${enc(x.src)}`;
-    try {
-      const body = await limited(async () => {
-        const resp = await fetchImpl(url, { timeout: TABLE_TIMEOUT_MS, headers: { "User-Agent": "IPTV pool (catchup)" } });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return resp.json();
-      });
-      const out = { epg_listings: Array.isArray(body?.epg_listings) ? body.epg_listings : [] };
-      tables.set(streamId, out);
-      return out;
-    } catch (e) {
-      log.error(`[XTREAM] Catch-up list from ${tile._catchup._pid} failed: ${e.message}`);
-      return { epg_listings: [] };
+    const members = archiveMembers(pool, tile);
+    if (!members.length) return { epg_listings: [] };
+    const tries = members.slice(0, TABLE_TRIES);
+    const deadline = Date.now() + TABLE_BUDGET_MS;
+    let failed = false;
+    let tried = 0;
+    for (const m of tries) {
+      if (tried && Date.now() > deadline) break;
+      tried++;
+      try {
+        const listings = await fetchTable(pool, m);
+        if (!listings.length) continue;
+        archives.found(tile._key, memberKey(m), m === tile._catchup);
+        const out = { epg_listings: listings };
+        tables.set(streamId, out);
+        return out;
+      } catch (e) {
+        failed = true;
+        log.error(`[XTREAM] Catch-up list from ${m._pid} failed: ${e.message}`);
+      }
     }
+    const out = { epg_listings: [] };
+    if (failed) return out;
+    if (tried === members.length) {
+      archives.none(tile._key);
+      log.log(`[XTREAM] No catch-up listings for "${tile.name}" on ${tries.map((m) => m._pid).join(", ")}`);
+    }
+    tables.set(streamId, out);
+    return out;
   }
 
   async function lookup(req, res, creds, streamId) {
@@ -634,14 +696,15 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
     const found = await lookup(req, res, creds, streamId);
     if (!found) return;
     const { user, pool, tile } = found;
-    const x = tile._catchup && xtreamChild(pool, tile._catchup);
+    const member = archiveMember(pool, tile);
+    const x = member && xtreamChild(pool, member);
     if (!x) return res.status(404).json({ error: "No archive" });
     const status = await accountStatus(pool);
-    const zone = status?.get(tile._catchup._pid)?.serverTimezone || "UTC";
+    const zone = status?.get(member._pid)?.serverTimezone || "UTC";
     const local = convertStart(start, zone);
     if (!local) return res.status(400).json({ error: "Bad start" });
-    playback.archive(user, streamId, tile._catchup);
-    log.log(`[XTREAM] ${user.username} archive ${streamId} "${tile.name}" -> ${tile._catchup._pid} (${form}, ${zone})`);
+    playback.archive(user, streamId, member);
+    log.log(`[XTREAM] ${user.username} archive ${streamId} "${tile.name}" -> ${member._pid} (${form}, ${zone})`);
     if (form === "path")
       return redirect(res, `${x.base}/timeshift/${enc(x.user)}/${enc(x.pass)}/${duration}/${local}/${enc(x.src)}.${ext}`);
     return redirect(res, `${x.base}/streaming/timeshift.php?username=${enc(x.user)}&password=${enc(x.pass)}&stream=${enc(x.src)}&start=${enc(local)}&duration=${duration}`);
@@ -660,7 +723,10 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
     return archive(req, res, { username: q.username, password: q.password }, streamId, q.duration, q.start, "php", "ts");
   });
 
-  router.flush = () => ids.flush();
+  router.flush = () => {
+    ids.flush();
+    archives.flush();
+  };
   return router;
 }
 
