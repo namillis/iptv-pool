@@ -128,9 +128,49 @@ function ticketPoints(price) {
 function gameName(away, home, comp, soccer) {
     const a = away.team.displayName || away.team.location;
     const h = home.team.displayName || home.team.location;
-    const note = String(comp?.notes?.[0]?.headline || '').replace(/\s+[-–]\s+/g, ' ').trim();
+    const note = roundNote(comp);
     const name = soccer ? `${h} vs ${a}` : `${a} @ ${h}`;
     return note ? `${name} · ${note}` : name;
+}
+
+function roundNote(comp) {
+    return String(comp?.notes?.[0]?.headline || '').replace(/\s+[-–]\s+/g, ' ').trim();
+}
+
+// ESPN's round note, or the week for football ("Week 5", "Preseason Week 2"). Football playoff weeks have no
+// meaningful number, so they only use the note.
+function roundOf(ev, json, comp, sport) {
+    const note = roundNote(comp);
+    if (note) return note;
+    const week = ev.week?.number ?? json?.week?.number;
+    if (!/football|^nfl$/i.test(sport) || !Number.isInteger(week)) return null;
+    const type = ev.season?.type;
+    if (type === 1) return `Preseason Week ${week}`;
+    return type === 3 ? null : `Week ${week}`;
+}
+
+function recordOf(competitor) {
+    const r = (competitor.records || []).find(x => x.type === 'total') || competitor.records?.[0];
+    return r && /^\d+(?:-\d+){1,2}$/.test(r.summary || '') ? r.summary : null;
+}
+
+function venueOf(comp) {
+    const v = comp?.venue;
+    if (!v?.fullName) return null;
+    const a = v.address || {};
+    const place = a.state || (a.country && a.country !== 'USA' ? a.country : null);
+    return [v.fullName, a.city, place].filter(Boolean).filter((s, i, all) => all.indexOf(s) === i).join(', ');
+}
+
+// National TV first, then national streaming, without radio: ["ESPN", "ABC"], ["ESPN+"].
+function nationalNetworks(comp) {
+    const geo = (comp?.geoBroadcasts || []).filter(g => g.market?.type === 'National' && g.media?.shortName && g.type?.shortName !== 'Radio');
+    const names = [
+        ...geo.filter(g => g.type?.shortName === 'TV').map(g => g.media.shortName),
+        ...geo.filter(g => g.type?.shortName !== 'TV').map(g => g.media.shortName)
+    ];
+    if (!names.length) for (const b of comp?.broadcasts || []) if (b.market === 'national') names.push(...(b.names || []));
+    return [...new Set(names)];
 }
 
 function parseScoreboard(json, sport, tier = 0, { soccer = false } = {}) {
@@ -161,7 +201,17 @@ function parseScoreboard(json, sport, tier = 0, { soccer = false } = {}) {
             color: home.team.color || away.team.color || null,
             altColor: home.team.alternateColor || away.team.alternateColor || null,
             state: type.state || 'pre',
-            detail: type.shortDetail || ''
+            detail: type.shortDetail || '',
+            info: {
+                round: roundOf(ev, json, comp, sport),
+                short: [away.team.shortDisplayName || away.team.location, home.team.shortDisplayName || home.team.location],
+                // A finished game's records already count its result.
+                records: type.state === 'post' ? [null, null] : [recordOf(away), recordOf(home)],
+                venue: venueOf(comp),
+                neutral: !!comp.neutralSite,
+                soccer,
+                tv: nationalNetworks(comp)
+            }
         });
     }
     return games;

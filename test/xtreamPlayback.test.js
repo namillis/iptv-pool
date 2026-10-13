@@ -303,7 +303,7 @@ test("pool_info, pool_stop and the try parameter over HTTP", async (t) => {
   const now = clock(Date.now());
   const { base, q, id, get } = await start(t, { now });
   const info = await (await fetch(`${base}/player_api.php?${q}&action=pool_info`)).json();
-  assert.deepStrictEqual(info, { pool: 1, version: 1, features: ["retry", "stop", "sources"] });
+  assert.deepStrictEqual(info, { pool: 1, version: 1, features: ["retry", "stop", "sources", "event_info"] });
   const bad = await (await fetch(`${base}/player_api.php?username=tv1&password=wrong-pass-123&action=pool_info`)).json();
   assert.deepStrictEqual(bad, { user_info: { auth: 0 } });
 

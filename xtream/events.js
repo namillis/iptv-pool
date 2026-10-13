@@ -1,10 +1,13 @@
 const crypto = require("crypto");
-const { currentEvents, eventState } = require("../liveEvents");
+const { currentEvents, eventState, categoryOf } = require("../liveEvents");
 
 const LIVE_NOW = "Live Now";
 const EVENT_BASE = 1_000_000_000;
 const EVENT_SPAN = 2 ** 27;
 const MEMBERS_MAX = 15;
+const TEXT_MAX = 400;
+const LIVE_PREFIX_RE = /^\s*(?:live|en vivo|en directo|direct|ao vivo)\s*[:\-–|]\s*/i;
+const MATCHUP_RE = /\s(?:vs\.?|v\.?|@|x)\s/i;
 
 /**
  * A stream number for an event, from its id so it stays the same while the event is listed.
@@ -35,6 +38,66 @@ function interleave(lists, max) {
     }
     if (!any) break;
   }
+  return out;
+}
+
+function listOf(names) {
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
+}
+
+function clip(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  return t.length > TEXT_MAX ? `${t.slice(0, TEXT_MAX - 1).trimEnd()}…` : t;
+}
+
+/** "Bills (4-1) at Rams (2-3). SoFi Stadium, Inglewood, CA. On ESPN and ABC." No scores, so nothing is spoiled. */
+function gameDescription(info) {
+  const [away, home] = info.short || [];
+  if (!away || !home) return null;
+  const [ra, rh] = info.records || [];
+  const side = (name, rec) => (rec ? `${name} (${rec})` : name);
+  const parts = [
+    info.soccer
+      ? `${side(home, rh)} vs ${side(away, ra)}`
+      : `${side(away, ra)} ${info.neutral ? "vs" : "at"} ${side(home, rh)}`,
+  ];
+  if (info.venue) parts.push(info.venue);
+  if (info.tv && info.tv.length) parts.push(`On ${listOf(info.tv.slice(0, 3))}`);
+  return `${parts.join(". ")}.`;
+}
+
+/** A guide or league title without a "Live:" lead-in or the matchup after a colon ("Boxing : A vs. B" is "Boxing"). */
+function programmeName(text) {
+  const t = String(text || "").replace(LIVE_PREFIX_RE, "").trim();
+  const m = t.match(/^(.+?)\s*:\s+(.+)$/);
+  return m && MATCHUP_RE.test(` ${m[2]} `) ? m[1] : t;
+}
+
+/**
+ * What the app shows for an event instead of the guide of the channel it borrows (`event_info`).
+ * An ESPN game gets its league and round, and the teams, venue and networks. Anything else gets its
+ * league or programme name, and the description of the guide listing it was found in. Null when the
+ * event has no usable time span.
+ */
+function poolEvent(e) {
+  const start = Math.floor(e.start / 1000);
+  const end = Math.ceil(e.end / 1000);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  const category = categoryOf(e);
+  let title;
+  let description = null;
+  if (e.info && e.info.league) {
+    title = e.info.round ? `${e.info.league} · ${e.info.round}` : e.info.league;
+    description = gameDescription(e.info);
+  } else {
+    const guide = e.guide || {};
+    const named = [e.league, e.programme, guide.t].map(programmeName).find(Boolean);
+    title = named || category || e.network || "Live event";
+    description = guide.d || (guide.st && !e.title.includes(guide.st) ? guide.st : null);
+  }
+  const out = { title: clip(title), start, end };
+  if (description) out.description = clip(description);
+  if (category) out.category = category;
   return out;
 }
 
@@ -90,10 +153,12 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, now = Date
       tv_archive_duration: 0,
       direct_source: "",
     };
+    const info = poolEvent(e);
+    if (info) stream.pool_event = info;
     entries.push({ stream, tile, epgKey });
     byStreamId.set(id, tile);
   }
   return { entries, byStreamId };
 }
 
-module.exports = { buildEvents, eventNumber, interleave, LIVE_NOW, EVENT_BASE };
+module.exports = { buildEvents, eventNumber, interleave, poolEvent, LIVE_NOW, EVENT_BASE };
