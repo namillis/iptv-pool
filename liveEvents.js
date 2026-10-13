@@ -232,7 +232,7 @@ const SIDE_END = '\\s*(?:(?<!\\b(?:St|Mt|Ft))\\.|[,:;(]|\\s[-–]\\s|$)';
 const VERSUS_RE = new RegExp(`^\\s*(?:[Tt]he\\s+)?${RANK}${SIDE}\\s+([Vv][Ss]\\.?|[Vv]\\.?|[Aa][Tt]|@|x)\\s+(?:[Tt]he\\s+)?${RANK}${SIDE}${SIDE_END}`, 'u');
 // A guide line that describes the venue ("From Saban Field at Bryant-Denny Stadium") rather than the teams.
 const VENUE_LINE_RE = /^\s*(?:from|live from|desde|depuis|aus|dal|vanuit)\s/i;
-const HOST_RE = new RegExp(`^\\s*(?:the\\s+)?${RANK}${SIDE}\\s+(host|visit|welcome|face|meet|take on)s?\\s+(?:the\\s+)?${RANK}${SIDE}\\s*(?:[.,;(]|\\s(?:at|in|on|for|from)\\s)`, 'iu');
+const HOST_RE = new RegExp(`^\\s*(?:the\\s+)?${RANK}${SIDE}\\s+(host|visit|welcome|face off (?:against|with)|face|meet|take on)s?\\s+(?:the\\s+)?${RANK}${SIDE}\\s*(?:[.,;(]|\\s(?:at|in|on|for|from)\\s)`, 'iu');
 // "The Rams host the Bills at SoFi Stadium" fits VERSUS_RE as "Rams host the Bills" at "SoFi Stadium".
 const HOST_VERB_RE = /\b(?:host|visit|welcome|face|meet|take on)s?\b/i;
 // A provider's alternate broadcast of a game: an alt-cast, or another language named on its own ("– ESPAÑOL",
@@ -259,13 +259,27 @@ function looksLikeGame(title) {
         SERIES_RE.test(t) || SERIES_RE.test(head) || SPANISH_GAME_RE.test(t);
 }
 const MERGE_WINDOW_MS = 45 * 60000;
+// Two guides of one channel can disagree by an hour (an Irish feed of Premier Sports listed a match an hour after the
+// UK feed), so listings of the same teams that overlap in time are one event within this window.
+const SAME_MATCHUP_WINDOW_MS = 75 * 60000;
 const GUIDE_BEFORE_MS = 10 * 60000;
 const GUIDE_AHEAD_MS = 70 * 60000;
 const MIN_GAME_SECONDS = 50 * 60;
 const MIN_MATCHUP_SECONDS = 25 * 60;
+// A lower-case lead-in before the first team in a guide sentence ("Serie A action as Como", "This episode features
+// Aoiyama"). Team names are capitalized, so only lower-case connector words are cut.
+const SIDE_LEAD_IN_RE = /^.*\s(?:as|features|featuring|sees|when|where)\s+(?=\p{Lu})/u;
+// A description that lists several bouts or games ("Aoiyama vs Takekaze, Kotoshogiku vs Terunofuji, ...") is a
+// compilation show, not one live game.
+const COMPILATION_RE = /\s(?:vs\.?|v\.?)\s/gi;
+const COMPILATION_MIN = 3;
 
 function cleanSide(s) {
-    return s.replace(/\s*\((?:week|wk|round|rd|game|match|md)[^)]*\)\s*$/i, '').trim();
+    return s.replace(/\s*\((?:week|wk|round|rd|game|match|md)[^)]*\)\s*$/i, '').replace(SIDE_LEAD_IN_RE, '').trim();
+}
+
+function isCompilation(text) {
+    return (String(text || '').match(COMPILATION_RE) || []).length >= COMPILATION_MIN;
 }
 
 function validSide(s) {
@@ -344,14 +358,25 @@ function findGame(e, games) {
     return best ? best.g : null;
 }
 
-// A guide airing of a game that ESPN already lists as finished is a replay, unless the same teams still have a game to play.
-function dropGuideReplays(byKey, games) {
-    if (!games || !games.length) return;
+// A guide airing of a game that ESPN already lists as finished is a replay, unless the same teams still have a game to
+// play or the guide marks it live. [history] holds finished games from the days before yesterday, so last weekend's
+// game shown again on Monday night ("Minnesota Vikings @ New Orleans Saints" on beIN) is caught too. A cup listing
+// isn't taken for a replay of a league game between the same teams.
+function dropGuideReplays(byKey, games, history = null) {
+    const today = games || [];
+    const past = history && history.length ? [...today, ...history] : today;
+    if (!past.length) return;
     for (const [key, e] of byKey) {
-        if (!e.fromGuide || !e.teams || findGame(e, games)) continue;
-        const played = games.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams));
-        if (played && !games.some(g => g.state !== 'post' && hasTeams(g, e.teams))) byKey.delete(key);
+        if (!e.fromGuide || !e.teams || e.listedLive || findGame(e, today)) continue;
+        const played = past.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams) && !otherCompetition(e, g));
+        if (played && !today.some(g => g.state !== 'post' && hasTeams(g, e.teams))) byKey.delete(key);
     }
+}
+
+const CUP_RE = /\b(?:cup|copa|coupe|pokal|coppa|ta[çc]a|trophy|shield)\b/i;
+
+function otherCompetition(e, g) {
+    return CUP_RE.test([e.league, e.programme, e.title].filter(Boolean).join(' ')) && !CUP_RE.test(g.sport || '');
 }
 
 // Polymarket sides are [full name, name, alias]. College names are mascots ("Warhawks"), so one side may match
@@ -434,7 +459,7 @@ function guideEvent(p, channelLabel, now = Date.now()) {
     if (!p.l && !sportCat && !sportChannel && MOVIE_CHANNEL.test(channelLabel)) return null;
     if (!p.l && NOT_LIVE_TITLE.test(title)) return null;
     if (!p.l && REPLAY_DESC.test(p.d || '')) return null;
-    const matchup = matchupOf(p.st) || matchupOf(title) || matchupOf(p.d);
+    const matchup = matchupOf(p.st) || matchupOf(title) || (isCompilation(p.d) ? null : matchupOf(p.d));
     if (!matchup && !p.l && !looksLikeGame(title)) return null;
     if (!p.l && p.e - p.s < (matchup ? MIN_MATCHUP_SECONDS : MIN_GAME_SECONDS)) return null;
     const fromTitle = matchup && title.includes(matchup.teams[0]) && title.includes(matchup.teams[1]);
@@ -531,6 +556,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
                 if (brand) entry.brands.set(brand, (entry.brands.get(brand) || 0) + 1);
             }
             entry.text = `${entry.text || ''} ${[p.t, p.st, p.d].filter(Boolean).join(' ')}`;
+            if (p.l) entry.listedLive = true;
             if (!entry.sources.includes(src)) entry.sources.push(src);
             for (const l of links) if (!entry.channels.some(c => c.id === l.id)) entry.channels.push(l);
         }
@@ -807,7 +833,8 @@ function mergeSameMatchups(byKey) {
     const kept = [];
     for (const [key, e] of byKey) {
         if (!e.teams) continue;
-        const i = kept.findIndex(([, o]) => Math.abs(o.start - e.start) <= MERGE_WINDOW_MS && sameTeams(o.teams, e.teams) &&
+        const i = kept.findIndex(([, o]) => Math.abs(o.start - e.start) <= SAME_MATCHUP_WINDOW_MS && o.start < e.end && e.start < o.end &&
+            sameTeams(o.teams, e.teams) &&
             sameGender(o.title, e.title) && sameSport(o, e));
         if (i === -1) {
             kept.push([key, e]);
@@ -954,7 +981,7 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
 // Conference", "ACC Network Football Podcast"). Without teams, those aren't events.
 const SLOT_SHOW_RE = /\b(?:press conference|podcast|media day|post[- ]?show|pre[- ]?show|show|talk|open mic)\b|^the\s/i;
 
-function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, races = null } = {}) {
+function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
     for (const c of channels) {
@@ -994,7 +1021,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         entry.channels.push(link);
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
-    dropGuideReplays(byKey, schedule);
+    dropGuideReplays(byKey, schedule, history);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
     mergeSameMatchups(byKey);
@@ -1009,6 +1036,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         }
         delete e.game;
         delete e.fromGuide;
+        delete e.listedLive;
         delete e.text;
     }
     const byId = new Map();
