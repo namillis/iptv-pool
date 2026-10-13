@@ -30,6 +30,7 @@ const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
+const HOME_KEY = "\u0000HOME|";
 const POOL_API_VERSION = 1;
 const POOL_FEATURES = ["retry", "stop", "sources", "event_info"];
 const ATTEMPT_RE = /^\d{1,3}$/;
@@ -101,26 +102,53 @@ function panelTime(ms) {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
-function buildView(pool, ids, countries) {
+/**
+ * The home lineup from xtream/home.json: categories of hand-picked channels (by tile key, most
+ * watched first) that go ahead of the provider's own, for logins that include [country]. Each
+ * key may appear once, since a channel can only be in one category.
+ */
+function loadHome(raw) {
+  const country = String(raw?.country || "").toUpperCase();
+  if (!COUNTRY_RE.test(country)) throw new Error('home "country" must be a country code');
+  if (!Array.isArray(raw.categories)) throw new Error('home "categories" must be a list');
+  const slots = new Map();
+  const categories = raw.categories.map((c, i) => {
+    const name = String(c?.name || "").trim();
+    if (!name) throw new Error(`home categories[${i}] needs a name`);
+    if (!Array.isArray(c.keys)) throw new Error(`home category "${name}" needs a "keys" list`);
+    c.keys.forEach((key, rank) => {
+      if (slots.has(key)) throw new Error(`home key "${key}" is listed twice`);
+      slots.set(key, { category: i, rank });
+    });
+    return { name, size: c.keys.length };
+  });
+  return { country, categories, slots };
+}
+
+const HOME = loadHome(require("./home.json"));
+
+function buildView(pool, ids, countries, home = HOME) {
   const wanted = countries.length ? new Set(countries) : null;
+  const curated = home && (!wanted || wanted.has(home.country)) ? home : null;
   const streamIds = ids.assignStreams(pool.channels);
-  const categories = [];
+  const homeLists = curated
+    ? curated.categories.map((c) => ({ id: ids.categoryId(HOME_KEY + c.name), name: c.name, list: new Array(c.size) }))
+    : [];
+  const provider = [];
   const byCategory = new Map();
-  const streams = [];
+  const entries = [];
   const byStreamId = new Map();
   for (const tile of pool.channels) {
-    if (wanted && !wanted.has(tileCountry(tile._key))) continue;
+    const country = tileCountry(tile._key);
+    if (wanted && !wanted.has(country)) continue;
     const groups = tile._groups.length ? tile._groups : ["Other"];
-    const catIds = groups.map((g) => ids.categoryId(g));
-    const categoryId = catIds[0];
-    let list = byCategory.get(categoryId);
-    if (!list) {
-      byCategory.set(categoryId, (list = []));
-      categories.push({ category_id: String(categoryId), category_name: groups[0], parent_id: 0 });
-    }
+    let catIds = groups.map((g) => ids.categoryId(g));
+    const slot = curated && curated.slots.get(tile._key);
+    const categoryId = slot ? homeLists[slot.category].id : catIds[0];
+    if (slot) catIds = [categoryId, ...catIds];
     const epgKey = tile._epg && pool.epgData[tile._epg]?.length ? tile._epg : null;
     const stream = {
-      num: streams.length + 1,
+      num: 0,
       name: tile.name,
       stream_type: "live",
       stream_id: streamIds.get(tile),
@@ -135,23 +163,46 @@ function buildView(pool, ids, countries) {
       tv_archive_duration: tile._catchup ? tile.archiveDays || 1 : 0,
       direct_source: "",
     };
-    streams.push({ stream, tile, epgKey });
+    entries.push({ stream, tile, epgKey });
     byStreamId.set(stream.stream_id, tile);
-    list.push(stream);
+    if (slot) {
+      homeLists[slot.category].list[slot.rank] = stream;
+      continue;
+    }
+    let group = byCategory.get(categoryId);
+    if (!group) {
+      byCategory.set(categoryId, (group = { id: categoryId, name: groups[0], list: [], home: 0 }));
+      provider.push(group);
+    }
+    group.list.push(stream);
+    if (curated && country === curated.country) group.home++;
+  }
+  const ordered = homeLists.map((c) => ({ ...c, list: c.list.filter(Boolean) })).filter((c) => c.list.length);
+  if (curated) {
+    const isHome = (g) => g.home * 2 > g.list.length;
+    ordered.push(...provider.filter(isHome), ...provider.filter((g) => !isHome(g)));
+  } else {
+    ordered.push(...provider);
   }
   const gz = (value) => zlib.gzipSync(JSON.stringify(value));
+  const categories = ordered.map((c) => ({ category_id: String(c.id), category_name: c.name, parent_id: 0 }));
+  const streamList = [];
   const categoryStreams = new Map();
-  for (const [id, list] of byCategory) categoryStreams.set(String(id), gz(list));
+  for (const c of ordered) {
+    for (const s of c.list) s.num = streamList.push(s);
+    categoryStreams.set(String(c.id), gz(c.list));
+  }
   return {
     channels: pool.channels,
     builtAt: Date.now(),
-    count: streams.length,
-    entries: streams,
+    count: streamList.length,
+    entries,
     byStreamId,
+    homeCountry: curated ? curated.country : null,
     categoryList: categories,
-    streamList: streams.map((s) => s.stream),
+    streamList,
     categoriesGz: gz(categories),
-    streamsGz: gz(streams.map((s) => s.stream)),
+    streamsGz: gz(streamList),
     categoryStreams,
     live: null,
     guide: null,
@@ -169,7 +220,7 @@ function buildLive(pool, ids, view, countries, now = Date.now()) {
   let events = { entries: [], byStreamId: new Map() };
   if (typeof pool.liveEventIndex === "function") {
     try {
-      events = buildEvents(pool, { countries, categoryId, tileCountry, now });
+      events = buildEvents(pool, { countries, categoryId, tileCountry, homeCountry: view.homeCountry, now });
     } catch (e) {
       console.error(`[XTREAM] Live Now failed: ${e.message}`);
     }
@@ -613,4 +664,4 @@ function createXtreamRouter({ usersFile, idsFile, getPool, log = console, fetchI
   return router;
 }
 
-module.exports = { createXtreamRouter, loadUsers, buildView, buildGuide, tileCountry, xmltvTime, xmlEscape };
+module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildGuide, tileCountry, xmltvTime, xmlEscape };

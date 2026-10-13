@@ -22,6 +22,48 @@ const COUNTRY_WORD_RES = {
 };
 const PLACEHOLDER_RE = /^(?:NOMATCH|NOEVENTS?|NOEVENTSCHEDULED|NOEVENTTODAY|NOLIVEEVENT|OFFAIR|COMINGSOON)$/;
 
+/**
+ * Keys for one network that providers spell differently, folded into the key most providers use
+ * so the network is one tile with every source.
+ */
+const KEY_ALIASES = {
+    'US|MSNOW': 'US|MSNBC',
+    'US|MSNOWMSNBC': 'US|MSNBC',
+    'US|FS1': 'US|FOXSPORTS1',
+    'US|FS2': 'US|FOXSPORTS2',
+    'US|NICK': 'US|NICKELODEON',
+    'US|BTN': 'US|BIGTENNETWORK',
+    'US|FOXBUSINESS': 'US|FOXBUSINESSNETWORK',
+    'US|TURNERCLASSICMOVIES': 'US|TCM',
+    'US|LIFETIMEMOVIENETWORK': 'US|LMN',
+    'US|LIFETIMEMOVIES': 'US|LMN',
+    'US|LIFETIMEMOVIE': 'US|LMN',
+    'US|MGM': 'US|MGMPLUS',
+    'US|EPIX': 'US|MGMPLUS',
+    'US|HALLMARKMYSTERY': 'US|HALLMARKMOVIESANDMYSTERIES',
+    'US|HALLMARKMANDM': 'US|HALLMARKMOVIESANDMYSTERIES',
+    'US|ID': 'US|INVESTIGATIONDISCOVERY',
+    'US|DISCOVERYID': 'US|INVESTIGATIONDISCOVERY',
+    'US|DISCOVERYINVESTIGATION': 'US|INVESTIGATIONDISCOVERY',
+    'US|NATIONALGEOGRAPHIC': 'US|NATGEO',
+    'US|MAGNOLIA': 'US|MAGNOLIANETWORK',
+    'US|GSN': 'US|GAMESHOWNETWORK',
+    'US|DISNEYJUNIOR': 'US|DISNEYJR',
+    'US|EENTERTAINMENT': 'US|E',
+    'US|CSPAN': 'US|CSPAN1',
+    'US|FXMOVIES': 'US|FXM',
+    'US|FXMOVIE': 'US|FXM',
+    'US|ESPNEWS': 'US|ESPNNEWS',
+    'US|NEWSMAXTV': 'US|NEWSMAX',
+    'US|CWNETWORK': 'US|CW',
+    'US|AMCNETWORK': 'US|AMC',
+    'US|UNIVISIONNETWORK': 'US|UNIVISION',
+    'US|USANETWORKUS': 'US|USANETWORK',
+    'US|CBSNEWS247': 'US|CBSNEWS',
+    'CALL|WDCA|MY': 'CALL|WDCA|FOX',
+    'CALL|WZDC|NBC': 'CALL|WZDC|TELEMUNDO'
+};
+
 const QUALITY_RULES = [
     [/\b(?:4K|8K|UHD)\b/, 'UHD', 2],
     [/\b(?:FHD|1080P)\b/, 'FHD', 0],
@@ -92,6 +134,11 @@ function stripCountryWord(text, country) {
 }
 
 function channelKey(name, defaultCountry = '') {
+    const key = rawChannelKey(name, defaultCountry);
+    return key && (KEY_ALIASES[key] || key);
+}
+
+function rawChannelKey(name, defaultCountry) {
     const { prefix, rest: text } = splitPrefix(prepare(name));
     let country = prefix;
     let rest = text;
@@ -166,4 +213,4 @@ function groupByKey(members, keyOf) {
     return [...byKey.values()];
 }
 
-module.exports = { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey };
+module.exports = { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey, KEY_ALIASES };

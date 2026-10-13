@@ -106,11 +106,12 @@ function poolEvent(e) {
  * Xtream login. Each one plays the event's ranked channels in order, so the usual failover walks
  * through them. Channels outside the login's [countries] are left out, and an event with none left
  * is dropped. The guide id is the first ranked channel that has guide data, so the guide shows
- * what that channel is airing.
+ * what that channel is airing. With a [homeCountry], events on one of its channels come first.
  */
-function buildEvents(pool, { countries = [], categoryId, tileCountry, now = Date.now() }) {
+function buildEvents(pool, { countries = [], categoryId, tileCountry, homeCountry = null, now = Date.now() }) {
   const wanted = countries.length ? new Set(countries) : null;
   const entries = [];
+  const away = [];
   const byStreamId = new Map();
   const taken = new Set();
   for (const e of currentEvents(pool.liveEventIndex(), now)) {
@@ -138,7 +139,7 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, now = Date
       archiveDays: 0,
     };
     const stream = {
-      num: entries.length + 1,
+      num: 0,
       name,
       stream_type: "live",
       stream_id: id,
@@ -155,9 +156,12 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, now = Date
     };
     const info = poolEvent(e);
     if (info) stream.pool_event = info;
-    entries.push({ stream, tile, epgKey });
+    const home = !homeCountry || tiles.some((t) => tileCountry(t._key) === homeCountry);
+    (home ? entries : away).push({ stream, tile, epgKey });
     byStreamId.set(id, tile);
   }
+  entries.push(...away);
+  entries.forEach((e, i) => { e.stream.num = i + 1; });
   return { entries, byStreamId };
 }
 

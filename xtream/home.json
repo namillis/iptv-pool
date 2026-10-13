@@ -1,0 +1,167 @@
+{
+  "country": "US",
+  "categories": [
+    {
+      "name": "Local",
+      "keys": [
+        "CALL|WUSA|CBS",
+        "CALL|WRC|NBC",
+        "CALL|WJLA|ABC",
+        "CALL|WTTG|FOX",
+        "CALL|WETA|PBS",
+        "CALL|WZDC|TELEMUNDO",
+        "CALL|WFDC|UNIVISION",
+        "CALL|WDCA|FOX",
+        "CALL|WHUT|PBS"
+      ]
+    },
+    {
+      "name": "Sports",
+      "keys": [
+        "US|ESPN",
+        "US|ESPN2",
+        "US|TNT",
+        "US|TBS",
+        "US|FOXSPORTS1",
+        "US|NFLNETWORK",
+        "US|NFLREDZONE",
+        "US|TRUTV",
+        "US|MLBNETWORK",
+        "US|NBA",
+        "US|NHLNETWORK",
+        "US|GOLF",
+        "US|BIGTENNETWORK",
+        "US|SECNETWORK",
+        "US|ACCNETWORK",
+        "US|ESPNU",
+        "US|CBSSPORTSNETWORK",
+        "US|FOXSPORTS2",
+        "US|TENNIS",
+        "US|ESPNNEWS"
+      ]
+    },
+    {
+      "name": "News",
+      "keys": [
+        "US|FOXNEWS",
+        "US|MSNBC",
+        "US|CNN",
+        "US|NEWSMAX",
+        "US|NEWSNATION",
+        "US|CNBC",
+        "US|HLN",
+        "US|FOXBUSINESSNETWORK",
+        "US|WEATHER",
+        "US|COURT",
+        "US|CSPAN1",
+        "US|BLOOMBERG",
+        "US|ABCNEWSLIVE",
+        "US|NBCNEWSNOW",
+        "US|CBSNEWS",
+        "US|LIVENOWFROMFOX"
+      ]
+    },
+    {
+      "name": "Entertainment",
+      "keys": [
+        "US|HGTV",
+        "US|ION",
+        "US|HALLMARK",
+        "US|METV",
+        "US|CW",
+        "US|TLC",
+        "US|HISTORY",
+        "US|FOODNETWORK",
+        "US|USANETWORK",
+        "US|DISCOVERY",
+        "US|BRAVO",
+        "US|TVLAND",
+        "US|GAMESHOWNETWORK",
+        "US|AANDE",
+        "US|INVESTIGATIONDISCOVERY",
+        "US|AMC",
+        "US|LIFETIME",
+        "US|FX",
+        "US|PARAMOUNTNETWORK",
+        "US|COMEDYCENTRAL",
+        "US|FREEFORM",
+        "US|SYFY",
+        "US|ADULTSWIM",
+        "US|BET",
+        "US|E",
+        "US|NATGEO",
+        "US|GRIT",
+        "US|INSP",
+        "US|BOUNCE",
+        "US|WETV",
+        "US|OXYGEN",
+        "US|REELZ",
+        "US|MTV",
+        "US|COZI",
+        "US|LAFF",
+        "US|START",
+        "US|HEROESANDICONS",
+        "US|TRAVEL",
+        "US|MAGNOLIANETWORK",
+        "US|MOTORTREND",
+        "US|FXX",
+        "US|ANIMALPLANET",
+        "US|BBCAMERICA",
+        "US|CMT",
+        "US|OWN",
+        "US|POP",
+        "US|VH1",
+        "US|COOKING",
+        "US|SMITHSONIAN"
+      ]
+    },
+    {
+      "name": "Movies",
+      "keys": [
+        "US|HBO",
+        "US|SHOWTIME",
+        "US|STARZ",
+        "US|CINEMAX",
+        "US|MGMPLUS",
+        "US|TCM",
+        "US|HALLMARKMOVIESANDMYSTERIES",
+        "US|LMN",
+        "US|FXM",
+        "US|IFC",
+        "US|SUNDANCE",
+        "US|HBO2",
+        "US|HBOSIGNATURE",
+        "US|HBOFAMILY"
+      ]
+    },
+    {
+      "name": "Kids",
+      "keys": [
+        "US|NICKELODEON",
+        "US|DISNEY",
+        "US|CARTOONNETWORK",
+        "US|NICKJR",
+        "US|DISNEYJR",
+        "US|DISNEYXD",
+        "US|NICKTOONS",
+        "US|BOOMERANG",
+        "US|PBSKIDS",
+        "US|TEENNICK",
+        "US|DISCOVERYFAMILY",
+        "US|BABYFIRST"
+      ]
+    },
+    {
+      "name": "Español",
+      "keys": [
+        "US|UNIVISION",
+        "US|TELEMUNDO",
+        "US|UNIMAS",
+        "US|TUDN",
+        "US|GALAVISION",
+        "US|ESPNDEPORTES",
+        "US|FOXDEPORTES"
+      ]
+    }
+  ]
+}
