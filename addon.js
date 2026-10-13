@@ -428,6 +428,7 @@ class M3UEPGAddon {
                 epgData: this.epgData,
                 epgIdOf: c => this.epgIdOf(c),
                 schedule: schedule.games,
+                history: schedule.history,
                 races: schedule.races
             });
             this.eventIndexFor = this.channels;

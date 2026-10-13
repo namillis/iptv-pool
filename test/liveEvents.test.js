@@ -226,3 +226,64 @@ test("alternate broadcasts play after the main broadcast and foreign guide match
   const order = M3UEPGAddon.prototype.rankedEventChannels.call(pool, e).map((c) => c.id);
   assert.deepStrictEqual(order, ["krdo", "e66", "sky", "mc"]);
 });
+
+function past(sport, daysAgo, away, home) {
+  return { id: `${away}-${home}`, sport, start: NOW - daysAgo * 86400000, teams: [away, home], label: `${away[0]} @ ${home[0]}`, state: "post" };
+}
+
+const VIKINGS = ["Minnesota", "Minnesota Vikings", "Vikings", "MIN"];
+const SAINTS = ["New Orleans", "New Orleans Saints", "Saints", "NO"];
+const FALCONS = ["Atlanta", "Atlanta Falcons", "Falcons", "ATL"];
+const ARSENAL = ["Arsenal", "Arsenal", "Arsenal", "ARS"];
+const LEEDS = ["Leeds United", "Leeds United", "Leeds", "LEE"];
+
+test("guide airings of games ESPN listed as finished in the last days are replays", () => {
+  const prog = (t, d, extra = {}) => [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T21:30:00Z"), t, d, ...extra }];
+  const channels = [
+    guideChannel("bein", "UK - BEIN SPORTS 2 ENGLISH"),
+    guideChannel("sky", "UK - SKY SPORTS ACTION"),
+    guideChannel("cup", "UK - SKY SPORTS MAIN EVENT"),
+    guideChannel("live", "UK - SKY SPORTS NFL"),
+  ];
+  const epg = {
+    bein: prog("Minnesota Vikings @ New Orleans Saints - NFL -National Footbal League – 2026/27", "The National Football League (NFL) is composed of 32 teams."),
+    sky: prog("NFL Football", "The New Orleans Saints face the Atlanta Falcons in the NFL."),
+    cup: prog("EFL Cup Football", "Arsenal v Leeds United. Third round action from the Emirates."),
+    live: prog("NFL Football", "Atlanta Falcons v New Orleans Saints.", { l: 1 }),
+  };
+  const history = [past("NFL", 2, VIKINGS, SAINTS), past("NFL", 7, FALCONS, SAINTS), past("Premier League", 3, LEEDS, ARSENAL)];
+  assert.strictEqual(titles(index(channels, epg)).length, 3);
+  const kept = titles(index(channels, epg, { schedule: [], history }));
+  assert.deepStrictEqual(kept.sort(), ["Arsenal vs Leeds United", "Atlanta Falcons vs New Orleans Saints"]);
+});
+
+test("a description listing several bouts is a compilation show, not a game", () => {
+  const idx = index(
+    [guideChannel("nbc", "US - NBC SPORTS CALIFORNIA")],
+    { nbc: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Fight Sports MMA", d: "This episode features Aoiyama vs Takekaze, Kotoshogiku vs Terunofuji, Endo vs Kakuryu, Jokoryu vs Goeido." }] },
+  );
+  assert.deepStrictEqual(titles(idx), []);
+});
+
+test("a lead-in before the first team and 'face off against' are read correctly", () => {
+  const idx = index(
+    [guideChannel("tnt", "UK - TNT SPORTS 4"), guideChannel("tnt2", "UK - TNT SPORTS 3")],
+    {
+      tnt: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Serie A Football", d: "Serie A action as Como face off against Roma." }],
+      tnt2: [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T20:00:00Z"), t: "Serie A Football", d: "Action from Serie A as Cagliari host Juventus." }],
+    },
+  );
+  assert.deepStrictEqual([...idx.values()].map((e) => e.teams).sort(), [["Como", "Roma"], ["Juventus", "Cagliari"]]);
+});
+
+test("two guides an hour apart for one match are one event", () => {
+  const idx = index(
+    [guideChannel("uk", "UK - PREMIER SPORTS 2"), guideChannel("ie", "UK: PREMIER SPORTS 2 IRELAND")],
+    {
+      uk: [{ s: S("2026-10-12T18:30:00Z"), e: S("2026-10-12T20:30:00Z"), t: "LaLiga", d: "Alavés v Atlético Madrid." }],
+      ie: [{ s: S("2026-10-12T19:30:00Z"), e: S("2026-10-12T21:30:00Z"), t: "LaLiga", d: "Alavés v Atlético Madrid." }],
+    },
+  );
+  assert.strictEqual(idx.size, 1, titles(idx).join(" | "));
+  assert.strictEqual([...idx.values()][0].channels.length, 2);
+});

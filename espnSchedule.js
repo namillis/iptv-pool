@@ -59,10 +59,15 @@ const RETRY_MS = 2 * 60000;
 const TIMEOUT_MS = 8000;
 const CONCURRENCY = 6;
 
-const state = { games: [], races: [], version: 0, at: 0, failedAt: 0, loading: null };
+const state = { games: [], races: [], history: [], version: 0, at: 0, failedAt: 0, loading: null, historyLoading: null };
 const F1_URL = `${BASE_URL}racing/f1/scoreboard`;
 // ESPN stops listing ticket prices once a game starts, so the last price seen is kept per game.
 const ticketMemo = new Map();
+// Finished games from the days before yesterday, so a guide airing of last weekend's game is recognized as a replay.
+// A past day's results don't change, so each league's day is fetched once and kept until it leaves the window.
+const HISTORY_DAYS = 10;
+const HISTORY_MIN_TIER = 10;
+const historyDays = new Map();
 
 const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
 
@@ -250,6 +255,39 @@ async function refresh(now) {
     return { games: scoreGames(games, await featured, now), races: await races };
 }
 
+async function loadHistory(now) {
+    const wanted = new Set();
+    const jobs = [];
+    for (let back = 2; back <= HISTORY_DAYS; back++) {
+        const d = etDate(now - back * 86400000);
+        for (const [path, sport, tier, query] of LEAGUES) {
+            if (tier < HISTORY_MIN_TIER) continue;
+            const key = `${path}|${query || ''}|${d}`;
+            wanted.add(key);
+            if (!historyDays.has(key)) jobs.push({ key, sport, url: `${BASE_URL}${path}/scoreboard?dates=${d}&limit=500${query ? '&' + query : ''}` });
+        }
+    }
+    for (const key of historyDays.keys()) if (!wanted.has(key)) historyDays.delete(key);
+    for (let i = 0; i < jobs.length; i += CONCURRENCY) {
+        const batch = jobs.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(batch.map(j => fetchJson(j.url).then(json => parseScoreboard(json, j.sport))));
+        results.forEach((r, k) => {
+            if (r.status !== 'fulfilled') return;
+            historyDays.set(batch[k].key, r.value.filter(g => g.state === 'post').map(({ id, sport, start, teams, label }) => ({ id, sport, start, teams, label, state: 'post' })));
+        });
+    }
+    const seen = new Set();
+    const out = [];
+    for (const games of historyDays.values()) {
+        for (const g of games) {
+            if (g.id && seen.has(g.id)) continue;
+            if (g.id) seen.add(g.id);
+            out.push(g);
+        }
+    }
+    return out;
+}
+
 function getSchedule(now = Date.now()) {
     const stale = now - state.at > REFRESH_MS && now - state.failedAt > RETRY_MS;
     if (stale && !state.loading) {
@@ -265,6 +303,16 @@ function getSchedule(now = Date.now()) {
                 console.warn('[ESPN] Schedule refresh failed:', e.message);
             })
             .finally(() => { state.loading = null; });
+        // Past results load on their own, so they never hold up today's schedule.
+        if (!state.historyLoading) {
+            state.historyLoading = loadHistory(now)
+                .then(history => {
+                    if (history.length !== state.history.length) state.version++;
+                    state.history = history;
+                })
+                .catch(e => console.warn('[ESPN] Results history failed:', e.message))
+                .finally(() => { state.historyLoading = null; });
+        }
     }
     return state;
 }
