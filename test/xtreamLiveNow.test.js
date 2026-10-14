@@ -85,7 +85,7 @@ test("live and upcoming events become channels, filtered by country", () => {
 async function start(t) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-live-"));
   const usersFile = path.join(dir, "users.json");
-  fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "grapecloverplanet", countries: ["US", "UK"] }] }));
+  fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "fakepassword123", countries: ["US", "UK"] }] }));
   const pool = fakePool();
   const app = express();
   app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} } }));
@@ -93,7 +93,7 @@ async function start(t) {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
   t.after(() => server.close());
-  return { base: `http://127.0.0.1:${server.address().port}`, q: "username=tv1&password=grapecloverplanet" };
+  return { base: `http://127.0.0.1:${server.address().port}`, q: "username=tv1&password=fakepassword123" };
 }
 
 test("Live Now is the first category and plays through the event's channels", async (t) => {
@@ -114,7 +114,7 @@ test("Live Now is the first category and plays through the event's channels", as
   assert.ok(info.features.includes("event_info"));
 
   const id = live[0].stream_id;
-  const go = (n) => fetch(`${base}/live/tv1/grapecloverplanet/${id}.ts?try=${n}`, { redirect: "manual" });
+  const go = (n) => fetch(`${base}/live/tv1/fakepassword123/${id}.ts?try=${n}`, { redirect: "manual" });
   assert.strictEqual((await go(0)).headers.get("location"), "http://teck.example/live/u/p/4.ts");
   assert.strictEqual((await go(1)).headers.get("location"), "http://teck.example/live/u/p/1.ts", "next in order: ESPN on teck");
   assert.strictEqual((await go(2)).headers.get("location"), "http://elite.example/live/u/p/4.ts");

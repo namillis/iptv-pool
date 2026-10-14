@@ -173,7 +173,7 @@ function fakePool() {
 async function start(t, { fetchImpl, now, archiveFile } = {}) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-play-"));
   const usersFile = path.join(dir, "users.json");
-  fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "grapecloverplanet" }] }));
+  fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "fakepassword123" }] }));
   const pool = fakePool();
   const app = express();
   const router = createXtreamRouter({ usersFile, idsFile: null, archiveFile, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now });
@@ -183,7 +183,7 @@ async function start(t, { fetchImpl, now, archiveFile } = {}) {
   });
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
-  const q = "username=tv1&password=grapecloverplanet";
+  const q = "username=tv1&password=fakepassword123";
   const streams = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
   const id = (name) => streams.find((s) => s.name === name).stream_id;
   const get = (p) => fetch(base + p, { redirect: "manual" });
@@ -210,29 +210,29 @@ function tables(lists) {
 test("live and archive redirects over HTTP", async (t) => {
   const { base, id, get, q } = await start(t);
   const espn = id("ESPN");
-  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts`);
+  let r = await get(`/live/tv1/fakepassword123/${espn}.ts`);
   assert.strictEqual(r.status, 302);
   assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
   assert.strictEqual(r.headers.get("cache-control"), "no-store");
 
-  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts`);
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts`);
   assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts", "retry fails over");
 
-  r = await get(`/live/tv1/grapecloverplanet/${id("Some FAST channel")}.ts`);
+  r = await get(`/live/tv1/fakepassword123/${id("Some FAST channel")}.ts`);
   assert.strictEqual(r.headers.get("location"), "https://cdn.example/fast/index.m3u8");
 
   assert.strictEqual((await get(`/live/tv1/wrong-password-x/${espn}.ts`)).status, 401);
-  assert.strictEqual((await get(`/live/tv1/grapecloverplanet/999999.ts`)).status, 404);
-  assert.strictEqual((await get(`/live/tv1/grapecloverplanet/${espn}.mkv`)).status, 404);
+  assert.strictEqual((await get(`/live/tv1/fakepassword123/999999.ts`)).status, 404);
+  assert.strictEqual((await get(`/live/tv1/fakepassword123/${espn}.mkv`)).status, 404);
 
   const sky = id("Sky Sports Main Event");
-  r = await get(`/timeshift/tv1/grapecloverplanet/90/2026-10-12:19-00/${sky}.ts`);
+  r = await get(`/timeshift/tv1/fakepassword123/90/2026-10-12:19-00/${sky}.ts`);
   assert.strictEqual(r.status, 302);
   assert.strictEqual(r.headers.get("location"), "http://uk1.example:8080/timeshift/uk1user/uk1pass/90/2026-10-12:20-00/77.ts");
-  r = await get(`/streaming/timeshift.php?username=tv1&password=grapecloverplanet&stream=${sky}&start=2026-10-12:19-00&duration=90`);
+  r = await get(`/streaming/timeshift.php?username=tv1&password=fakepassword123&stream=${sky}&start=2026-10-12:19-00&duration=90`);
   assert.strictEqual(r.headers.get("location"), "http://uk1.example:8080/streaming/timeshift.php?username=uk1user&password=uk1pass&stream=77&start=2026-10-12%3A20-00&duration=90");
-  assert.strictEqual((await get(`/timeshift/tv1/grapecloverplanet/90/2026-10-12:19-00/${espn}.ts`)).status, 404, "no archive");
-  assert.strictEqual((await get(`/timeshift/tv1/grapecloverplanet/abc/2026-10-12:19-00/${sky}.ts`)).status, 400);
+  assert.strictEqual((await get(`/timeshift/tv1/fakepassword123/90/2026-10-12:19-00/${espn}.ts`)).status, 404, "no archive");
+  assert.strictEqual((await get(`/timeshift/tv1/fakepassword123/abc/2026-10-12:19-00/${sky}.ts`)).status, 400);
 
   const login = await (await fetch(`${base}/player_api.php?${q}`)).json();
   assert.strictEqual(login.user_info.active_cons, "1");
@@ -270,7 +270,7 @@ test("an empty list falls back to the next provider's catch-up, and replays play
   assert.deepStrictEqual(calls, ["nova", "ksenqw"], "one stream per provider, and not the one without catch-up");
   await table(cnn);
   assert.strictEqual(calls.length, 2, "cached");
-  const r = await get(`/timeshift/tv1/grapecloverplanet/60/2026-10-12:19-00/${cnn}.ts`);
+  const r = await get(`/timeshift/tv1/fakepassword123/60/2026-10-12:19-00/${cnn}.ts`);
   assert.strictEqual(r.headers.get("location"), "http://ksenqw.example/timeshift/ksenqwuser/ksenqwpass/60/2026-10-12:19-00/5.ts");
 });
 
@@ -318,7 +318,7 @@ test("stream requests are rate limited per login", async (t) => {
   const { get, id } = await start(t);
   const espn = id("ESPN");
   let last;
-  for (let i = 0; i < 31; i++) last = await get(`/live/tv1/grapecloverplanet/${espn}.m3u8`);
+  for (let i = 0; i < 31; i++) last = await get(`/live/tv1/fakepassword123/${espn}.m3u8`);
   assert.strictEqual(last.status, 429);
 });
 
@@ -382,11 +382,11 @@ test("pool_info, pool_stop and the try parameter over HTTP", async (t) => {
   assert.deepStrictEqual(bad, { user_info: { auth: 0 } });
 
   const espn = id("ESPN");
-  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  let r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0`);
   assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
-  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0`);
   assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
-  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=1`);
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=1`);
   assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts");
 
   let login = await (await fetch(`${base}/player_api.php?${q}`)).json();
@@ -434,15 +434,15 @@ test("sources list the channel's streams in order and mark the current one", () 
 test("pool_sources and source= over HTTP", async (t) => {
   const { base, q, id, get } = await start(t);
   const espn = id("ESPN");
-  let r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0`);
+  let r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0`);
   assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.ts");
   let body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
   assert.deepStrictEqual(body.sources.map((s) => [s.source, s.current]), [["teck.1", true], ["nova.2", false]]);
-  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0&source=nova.2`);
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0&source=nova.2`);
   assert.strictEqual(r.headers.get("location"), "http://nova.example/live/novauser/novapass/2.ts");
   body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
   assert.deepStrictEqual(body.sources.map((s) => s.current), [false, true]);
-  r = await get(`/live/tv1/grapecloverplanet/${espn}.ts?try=0&source=../../etc`);
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0&source=../../etc`);
   assert.strictEqual(r.status, 302, "a malformed source is ignored, not an error");
   assert.deepStrictEqual(await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=999`)).json(), { sources: [] });
 });
