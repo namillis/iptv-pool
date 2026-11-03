@@ -727,6 +727,32 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, l
     ids.flush();
     archives.flush();
   };
+
+  /**
+   * Builds each country set's channel view, Live Now list and guide before any app asks, so the first requests after
+   * a restart don't wait seconds behind them. That wait can run past an app's time limit for a quick check like
+   * `pool_info`. It builds once now and again when [settled] resolves (the startup provider refresh and the ESPN
+   * schedule), since either one makes the first build stale. A part that hasn't changed isn't rebuilt.
+   */
+  router.prebuild = async (settled = Promise.resolve()) => {
+    const pool = (await getPool()).pool;
+    const byProfile = new Map();
+    for (const user of users.values()) {
+      const profile = user.countries.join(",");
+      if (!byProfile.has(profile)) byProfile.set(profile, user);
+    }
+    const build = async () => {
+      if (typeof pool.liveEventIndex === "function") pool.liveEventIndex();
+      for (const [profile, user] of byProfile) {
+        const view = viewFor(pool, user);
+        liveFor(pool, view, user);
+        await guideFor(pool, view, profile);
+      }
+    };
+    await build();
+    await settled;
+    await build();
+  };
   return router;
 }
 
