@@ -424,3 +424,13 @@ test("on Sky Sports and Premier Sports UK channels, a listing without teams or '
   );
   assert.deepStrictEqual(titles(idx), ["Glasgow Clan vs Dundee Stars", "Live Tennis: ATP Paris Masters 2026 · Sky Sports Plus", "PREM Rugby · TNT Sports 3"]);
 });
+
+test("an event's channel cap keeps a few places for alternate broadcasts", () => {
+  const chans = (n, alt, prefix) => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, alt }));
+  const pick = (ranked) => M3UEPGAddon.prototype.eventChannels.call({ rankedEventChannels: () => ranked }, {}).map((c) => c.id);
+  const many = pick([...chans(20, false, "m"), ...chans(4, true, "a")]);
+  assert.strictEqual(many.length, 15);
+  assert.deepStrictEqual(many.slice(-4), ["m11", "a0", "a1", "a2"]);
+  assert.deepStrictEqual(pick([...chans(5, false, "m"), ...chans(4, true, "a")]), ["m0", "m1", "m2", "m3", "m4", "a0", "a1", "a2", "a3"]);
+  assert.strictEqual(pick(chans(20, false, "m")).length, 15);
+});

@@ -5,6 +5,8 @@ const LIVE_NOW = "Live Now";
 const EVENT_BASE = 1_000_000_000;
 const EVENT_SPAN = 2 ** 27;
 const MEMBERS_MAX = 15;
+// Alternate broadcasts (alt-casts, other languages) play last. These places are kept for them, one per alternate channel.
+const ALT_MEMBERS_KEPT = 3;
 const TEXT_MAX = 400;
 const LIVE_PREFIX_RE = /^\s*(?:live|en vivo|en directo|direct|ao vivo)\s*[:\-–|]\s*/i;
 const MATCHUP_RE = /\s(?:vs\.?|v\.?|@|x)\s/i;
@@ -122,11 +124,15 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, homeCountr
   const byStreamId = new Map();
   const taken = new Set();
   for (const e of currentEvents(pool.liveEventIndex(), now)) {
-    const tiles = pool.eventChannels(e)
-      .map((ch) => pool.tileById.get(ch.id))
-      .filter((t) => t && (!wanted || wanted.has(tileCountry(t._key))));
-    if (!tiles.length) continue;
-    const members = interleave(tiles.map((t) => t._primary || t._members), MEMBERS_MAX);
+    const picked = pool.eventChannels(e)
+      .map((ch) => ({ tile: pool.tileById.get(ch.id), alt: !!ch.alt }))
+      .filter(({ tile }) => tile && (!wanted || wanted.has(tileCountry(tile._key))));
+    if (!picked.length) continue;
+    const tiles = picked.map((p) => p.tile);
+    const streamsOf = (alt) => picked.filter((p) => p.alt === alt).map((p) => p.tile._primary || p.tile._members);
+    const altLists = streamsOf(true);
+    const main = interleave(streamsOf(false), MEMBERS_MAX - Math.min(altLists.length, ALT_MEMBERS_KEPT));
+    const members = [...main, ...interleave(altLists, MEMBERS_MAX - main.length)];
     if (!members.length) continue;
     const guided = tiles.find((t) => t._epg && pool.epgData[t._epg]?.length);
     const live = eventState(e, now) === "live";

@@ -119,3 +119,23 @@ test("Live Now is the first category and plays through the event's channels", as
   assert.strictEqual((await go(1)).headers.get("location"), "http://teck.example/live/u/p/1.ts", "next in order: ESPN on teck");
   assert.strictEqual((await go(2)).headers.get("location"), "http://elite.example/live/u/p/4.ts");
 });
+
+test("an event with many channels keeps places for its alternate broadcasts at the end", () => {
+  const mains = Array.from({ length: 16 }, (_, i) => tile(`t-m${i}`, `US|M${i}`, `Main ${i}`, [m("nova", 100 + i)]));
+  const alts = [tile("t-a0", "US|A0", "ManningCast", [m("nova", 200)]), tile("t-a1", "US|A1", "ESPN Deportes", [m("ultra", 201)])];
+  const channels = [...mains, ...alts].map((t, i) => ({ id: t.id, slot: t.name, source: "NFL", alt: i >= mains.length }));
+  const events = [{ id: "iptv_ev_mnf", title: "Bears @ Seahawks", start: NOW - HOUR, end: NOW + 2 * HOUR, sources: ["NFL"], channels, assumedDay: false }];
+  const pool = {
+    ...fakePool(),
+    tileById: new Map([...mains, ...alts].map((t) => [t.id, t])),
+    liveEventIndex: () => new Map(events.map((e) => [e.id, e])),
+  };
+  const members = buildEvents(pool, { countries: ["US"], categoryId: 7, tileCountry, now: NOW }).entries[0].tile._members;
+  assert.strictEqual(members.length, 15);
+  assert.deepStrictEqual(members.slice(-3).map((x) => x._src), ["iptv_live_112", "iptv_live_200", "iptv_live_201"]);
+
+  events[0].channels = channels.slice(0, 16);
+  const noAlts = buildEvents(pool, { countries: ["US"], categoryId: 7, tileCountry, now: NOW }).entries[0].tile._members;
+  assert.strictEqual(noAlts.length, 15);
+  assert.strictEqual(noAlts[14]._src, "iptv_live_114");
+});
