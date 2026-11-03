@@ -218,3 +218,43 @@ test("bad users files are refused", () => {
   assert.throws(() => loadUsers(write([{ username: "a", password: "long-enough-pass", countries: ["USA1"] }])), /invalid country/);
   assert.throws(() => loadUsers(write([{ username: "a", password: "long-enough-pass" }, { username: "a", password: "long-enough-pass" }])), /used twice/);
 });
+
+test("prebuild builds each country set's view and guide before the first request, and again once startup settles", async (t) => {
+  const dir = tmpDir();
+  const usersFile = path.join(dir, "users.json");
+  fs.writeFileSync(usersFile, JSON.stringify({
+    users: [
+      { username: "tv1", password: "correct-horse-battery", countries: ["us", "uk"] },
+      { username: "tv2", password: "correct-horse-battery", countries: ["us", "uk"] },
+      { username: "de", password: "correct-horse-battery", countries: ["de"] },
+    ],
+  }));
+  const pool = fakePool();
+  const lines = [];
+  const router = createXtreamRouter({
+    usersFile,
+    idsFile: path.join(dir, "ids.json"),
+    getPool: async () => ({ pool, touch() {} }),
+    log: { log: (m) => lines.push(m), error: (m) => lines.push(m) },
+  });
+  const built = () => lines.filter((l) => /\[XTREAM\] (View|Guide) /.test(l)).map((l) => l.replace(/:.*$/, ""));
+
+  let settle;
+  const prebuild = router.prebuild(new Promise((resolve) => { settle = resolve; }));
+  for (let i = 0; i < 200 && built().length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepStrictEqual(built().sort(), ['[XTREAM] Guide "DE"', '[XTREAM] Guide "UK,US"', '[XTREAM] View "DE"', '[XTREAM] View "UK,US"']);
+  pool.channels = [...pool.channels];
+  settle();
+  await prebuild;
+  assert.deepStrictEqual(built().filter((l) => l.includes("View")).sort(), ['[XTREAM] View "DE"', '[XTREAM] View "DE"', '[XTREAM] View "UK,US"', '[XTREAM] View "UK,US"']);
+
+  const app = express();
+  app.use(router);
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  t.after(() => server.close());
+  const before = lines.length;
+  const base = `http://127.0.0.1:${server.address().port}/player_api.php?username=tv1&password=correct-horse-battery`;
+  const streams = await (await fetch(`${base}&action=get_live_streams`)).json();
+  assert.strictEqual(streams.length, 4);
+  assert.deepStrictEqual(lines.slice(before).filter((l) => /\[XTREAM\] (View|Guide) /.test(l)), []);
+});

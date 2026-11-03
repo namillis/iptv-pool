@@ -19,6 +19,7 @@ const { sitePassword, sitePasswordEnabled } = require("./siteAuth");
 const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
 const { createPoolAddon } = require("./providerPool");
 const { createXtreamRouter } = require("./xtream/api");
+const { getSchedule } = require("./espnSchedule");
 const fs = require("fs");
 const LRUCache = require("./lruCache");
 
@@ -345,7 +346,7 @@ app.get("/:token/configure-xtream", (req, res) => {
 });
 
 const XTREAM_USERS_FILE = process.env.XTREAM_USERS_FILE || "";
-let xtreamEnabled = false;
+let xtreamRouter = null;
 if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
   try {
     const dataDir = process.env.XTREAM_DATA_DIR || path.join(__dirname, "xtream-data");
@@ -356,7 +357,7 @@ if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
       getPool: poolInterface,
     });
     app.use(router);
-    xtreamEnabled = true;
+    xtreamRouter = router;
     const flush = () => router.flush();
     process.once("SIGTERM", () => { flush(); process.exit(0); });
     process.once("SIGINT", () => { flush(); process.exit(0); });
@@ -549,6 +550,15 @@ app.listen(port, () => {
   console.log(
     `🚀 Server running on port ${port} (debug=${DEBUG}, prefetch=${PREFETCH_ENABLED})`,
   );
-  if (POOL_ENABLED || xtreamEnabled)
-    poolInterface().catch((e) => console.error("[POOL] Build failed:", e.message));
+  if (POOL_ENABLED || xtreamRouter)
+    poolInterface()
+      .then((iface) => xtreamRouter && xtreamRouter.prebuild(startupSettled(iface.pool))
+        .catch((e) => console.error("[XTREAM] Prebuild failed:", e.message)))
+      .catch((e) => console.error("[POOL] Build failed:", e.message));
 });
+
+// The startup provider refresh and the ESPN schedule, either of which changes what the Xtream login shows.
+function startupSettled(pool) {
+  const schedule = getSchedule();
+  return Promise.allSettled([pool.updateData(), schedule.loading, schedule.historyLoading]);
+}
