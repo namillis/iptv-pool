@@ -182,6 +182,7 @@ const CATCHUP_TTL_MS = 5 * 60 * 1000;
 const EVENT_INDEX_TTL_MS = 10 * 60 * 1000;
 const LIVE_NOW_CACHE_S = 60;
 const EVENT_STREAMS_MAX = 15;
+const ALT_FEEDS_KEPT = 3;
 const AFFILIATES_PER_NETWORK = 4;
 const GUIDE_CHECK_OFFSET_MS = 10 * 60000;
 const cardCache = new LRUCache({ max: 400, ttl: 12 * 3600 * 1000 });
@@ -543,8 +544,13 @@ class M3UEPGAddon {
         return out;
     }
 
+    // Alternate broadcasts rank last, so a game with many channels would lose every one of them to the cap. A few
+    // places are kept for them, and they go back to the main broadcast when there aren't enough alternates.
     eventChannels(e) {
-        return this.rankedEventChannels(e).slice(0, EVENT_STREAMS_MAX);
+        const ranked = this.rankedEventChannels(e);
+        const alts = ranked.filter(ch => ch.alt);
+        const main = ranked.filter(ch => !ch.alt).slice(0, EVENT_STREAMS_MAX - Math.min(alts.length, ALT_FEEDS_KEPT));
+        return [...main, ...alts.slice(0, EVENT_STREAMS_MAX - main.length)];
     }
 
     cardSpec(e) {
