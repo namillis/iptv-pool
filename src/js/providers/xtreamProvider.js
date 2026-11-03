@@ -5,6 +5,26 @@
 // episodes are transformed into Stremio 'videos' (season/episode).
 const fetch = require("node-fetch");
 
+const EPG_STALL_MS = 60000;
+
+/**
+ * Yields [body]'s chunks, aborting [controller] when no chunk arrives for [stallMs]. node-fetch's
+ * `timeout` stops counting once headers arrive, so without this a guide download that stalls
+ * mid-body never ends and holds up every later provider refresh.
+ */
+async function* abortOnStall(body, controller, stallMs) {
+  let timer = setTimeout(() => controller.abort(), stallMs);
+  try {
+    for await (const chunk of body) {
+      clearTimeout(timer);
+      yield chunk;
+      timer = setTimeout(() => controller.abort(), stallMs);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchData(addonInstance, { epg = true } = {}) {
   const { config } = addonInstance;
   const {
@@ -224,10 +244,13 @@ async function fetchData(addonInstance, { epg = true } = {}) {
       ? customEpgUrl
       : `${xtreamUrl}/xmltv.php?username=${encodeURIComponent(xtreamUsername)}&password=${encodeURIComponent(xtreamPassword)}`;
 
+    const controller = new AbortController();
     try {
-      const epgResp = await fetch(epgSource, { timeout: 120000 });
+      const epgResp = await fetch(epgSource, { timeout: 120000, signal: controller.signal });
       if (epgResp.ok) {
-        addonInstance.epgData = await addonInstance.parseEPGStream(epgResp.body);
+        addonInstance.epgData = await addonInstance.parseEPGStream(
+          abortOnStall(epgResp.body, controller, EPG_STALL_MS),
+        );
       }
     } catch {
       // Ignore EPG errors
@@ -424,4 +447,5 @@ module.exports = {
   fetchSeriesInfo,
   fetchAccountInfo,
   fetchCatchup,
+  abortOnStall,
 };
