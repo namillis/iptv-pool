@@ -8,8 +8,9 @@ const LEAGUES = [
     ['football/nfl', 'NFL', 60],
     ['basketball/nba', 'NBA', 40],
     ['basketball/wnba', 'WNBA', 30],
-    ['basketball/mens-college-basketball', "Men's College Basketball", 30],
-    ['basketball/womens-college-basketball', "Women's College Basketball", 15],
+    // The default college basketball scoreboards only list ranked and featured games; group 50 is all of Division I.
+    ['basketball/mens-college-basketball', "Men's College Basketball", 30, 'groups=50'],
+    ['basketball/womens-college-basketball', "Women's College Basketball", 15, 'groups=50'],
     ['baseball/mlb', 'MLB', 30],
     ['baseball/college-baseball', 'College Baseball', 5],
     ['hockey/nhl', 'NHL', 30],

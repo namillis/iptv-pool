@@ -365,3 +365,62 @@ test("a game that took in an hour-off feed doesn't swallow what that feed shows 
   );
   assert.deepStrictEqual(titles(idx), ["Glasgow Clan vs Guildford Flames", "NASCAR O'Reilly Series · Premier Sports"]);
 });
+
+test("a multiview of games that are each listed on their own is dropped", () => {
+  const idx = index([
+    slot("mv", "US - ESPN PLUS 279 : NHL DETROIT RED WINGS @ FLORIDA PANTHERS / COLORADO AVALANCHE @ CHICAGO BLACKHAWKS 03:32 PM ET (Oct 12)"),
+    slot("a", "US - ESPN PLUS 280 : DETROIT RED WINGS @ FLORIDA PANTHERS 03:00 PM ET (Oct 12)"),
+    slot("b", "US - ESPN PLUS 281 : COLORADO AVALANCHE @ CHICAGO BLACKHAWKS 03:30 PM ET (Oct 12)"),
+    slot("only", "US - ESPN PLUS 282 : NCAA MEN'S BASKETBALL ARMY @ #2 DUKE / BELLARMINE @ #24 VANDERBILT 03:00 PM ET (Oct 12)"),
+    slot("c", "US - ESPN PLUS 283 : ARMY @ DUKE 03:00 PM ET (Oct 12)"),
+  ]);
+  assert.deepStrictEqual(titles(idx), [
+    "Army @ Duke",
+    "Colorado Avalanche @ Chicago Blackhawks",
+    "Detroit Red Wings @ Florida Panthers",
+    "NCAA Men's Basketball Army @ #2 Duke / Bellarmine @ #24 Vanderbilt",
+  ]);
+});
+
+const RAIDERS = ["Las Vegas", "Las Vegas Raiders", "Raiders", "LV"];
+const JETS = ["New York", "New York Jets", "Jets", "NYJ"];
+
+test("an event slot of a game ESPN lists as already played is a replay, with the league in front of the teams", () => {
+  const listing = [slot("r", "US - ESPN PLUS 313 : NFL RAIDERS @ JETS 03:02 PM ET (Oct 12)")];
+  assert.deepStrictEqual(titles(index(listing, {}, { schedule: [past("NFL", 1, RAIDERS, JETS)] })), []);
+  const live = { ...past("NFL", 0, RAIDERS, JETS), start: NOW, state: "in", name: "Las Vegas Raiders @ New York Jets", networks: [] };
+  assert.deepStrictEqual(titles(index(listing, {}, { schedule: [live] })), ["Las Vegas Raiders @ New York Jets"]);
+});
+
+test("a Monday Night Football alternate broadcast that doesn't name the teams joins the game as an alternate feed", () => {
+  const idx = index(
+    [
+      slot("pe", "US - ESPN PLUS 327 : MONDAY NIGHT FOOTBALL WITH PEYTON AND ELI OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+      slot("e66", "US - ESPN PLUS 66 : BUFFALO BILLS @ LOS ANGELES RAMS OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+    ],
+    {},
+    { now: MNF + 30 * 60000, schedule: [mnfGame()] },
+  );
+  assert.deepStrictEqual(titles(idx), ["Buffalo Bills @ Los Angeles Rams"]);
+  const e = [...idx.values()][0];
+  assert.deepStrictEqual(e.channels.map((c) => [c.id, !!c.alt]).sort(), [["e66", false], ["pe", true]]);
+});
+
+test("on Sky Sports and Premier Sports UK channels, a listing without teams or 'Live' is a replay", () => {
+  const at = (t, d) => [{ s: S("2026-10-12T19:00:00Z"), e: S("2026-10-12T21:00:00Z"), t, d }];
+  const idx = index(
+    [
+      guideChannel("nova/skysportstennis.uk", "UK - SKY SPORTS TENNIS"),
+      guideChannel("nova/skysportsplus.uk", "UK - SKY SPORTS PLUS"),
+      guideChannel("nova/premiersports2.uk", "UK - PREMIER SPORTS 2"),
+      guideChannel("nova/tntsports3.uk", "UK - TNT SPORTS 3"),
+    ],
+    {
+      "nova/skysportstennis.uk": at("Tennis: ATP & WTA Indian Wells Open 2026", "A men's singles champion is crowned in the Indian Wells final."),
+      "nova/skysportsplus.uk": at("Live Tennis: ATP Paris Masters 2026", "Enjoy live action from the ATP and WTA Tours."),
+      "nova/premiersports2.uk": at("Elite Ice Hockey League", "Glasgow Clan v Dundee Stars."),
+      "nova/tntsports3.uk": at("PREM Rugby", "Action from the Gallagher PREM."),
+    },
+  );
+  assert.deepStrictEqual(titles(idx), ["Glasgow Clan vs Dundee Stars", "Live Tennis: ATP Paris Masters 2026 · Sky Sports Plus", "PREM Rugby · TNT Sports 3"]);
+});

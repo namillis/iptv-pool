@@ -238,7 +238,7 @@ const HOST_VERB_RE = /\b(?:host|visit|welcome|face|meet|take on)s?\b/i;
 // A provider's alternate broadcast of a game: an alt-cast, or another language named on its own ("– ESPAÑOL",
 // "(SPANISH)", "EN ESPAÑOL") rather than inside a name ("French River Rapids", "Spanish LaLiga"). It plays after the
 // main broadcast.
-const ALT_CAST_RE = /\b(?:manningcast|megacast|alt(?:ernate)?[- ]?cast)\b/i;
+const ALT_CAST_RE = /\b(?:manningcast|megacast|alt(?:ernate)?[- ]?cast|with peyton (?:and|&) eli)\b/i;
 const ALT_PART_RE = /^(?:(?:en|in)\s+)?(?:espa[ñn]ol|spanish|portugu[eê]s|fran[cç]ais|french|deutsch|german|italiano|esp|alt|alternate)(?:\s+(?:feed|commentary|broadcast|audio))?$/iu;
 
 function isAltFeed(title) {
@@ -360,16 +360,16 @@ function findGame(e, games) {
     return best ? best.g : null;
 }
 
-// A guide airing of a game that ESPN already lists as finished is a replay, unless the same teams still have a game to
-// play or the guide marks it live. [history] holds finished games from the days before yesterday, so last weekend's
-// game shown again on Monday night ("Minnesota Vikings @ New Orleans Saints" on beIN) is caught too. A cup listing
-// isn't taken for a replay of a league game between the same teams.
-function dropGuideReplays(byKey, games, history = null) {
+// A guide airing or event slot of a game that ESPN already lists as finished is a replay, unless the same teams still
+// have a game to play or the guide marks it live. [history] holds finished games from the days before yesterday, so
+// last weekend's game shown again on Monday night ("Minnesota Vikings @ New Orleans Saints" on beIN, "NFL Raiders @
+// Jets" on ESPN+) is caught too. A cup listing isn't taken for a replay of a league game between the same teams.
+function dropReplays(byKey, games, history = null) {
     const today = games || [];
     const past = history && history.length ? [...today, ...history] : today;
     if (!past.length) return;
     for (const [key, e] of byKey) {
-        if (!e.fromGuide || !e.teams || e.listedLive || findGame(e, today)) continue;
+        if (!e.teams || e.listedLive || findGame(e, today)) continue;
         const played = past.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams) && !otherCompetition(e, g));
         if (played && !today.some(g => g.state !== 'post' && hasTeams(g, e.teams))) byKey.delete(key);
     }
@@ -571,6 +571,16 @@ function guideListing(p) {
     return out;
 }
 
+// On their UK channels, Sky Sports and Premier Sports start the title of a live event that has no teams with "Live"
+// ("Live Tennis: ATP Paris Masters 2026"), so one without it is a replay ("Tennis: ATP & WTA Indian Wells Open 2026" in
+// November). Live games that name their teams don't always have it ("Monday Night Football" on Sky Sports Main Event).
+const LIVE_MARKING_CHANNEL_RE = /\b(?:sky ?sports|premier ?sports)\b/i;
+const LIVE_TITLE_RE = /^\s*live\b/i;
+
+function unmarkedTeamlessReplay(p, g, label, epgId) {
+    return !g.teams && !p.l && /\.uk$/i.test(epgId) && LIVE_MARKING_CHANNEL_RE.test(label) && !LIVE_TITLE_RE.test(p.t || '');
+}
+
 function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
     for (const [epgId, list] of Object.entries(epgData || {})) {
         const chans = channelsByEpgId.get(epgId);
@@ -582,7 +592,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
             const end = p.e * 1000;
             if (end <= now - GUIDE_BEFORE_MS || start >= now + GUIDE_AHEAD_MS) continue;
             const g = guideEvent(p, label, now);
-            if (!g || isRaceReplay(p, start, races)) continue;
+            if (!g || isRaceReplay(p, start, races) || unmarkedTeamlessReplay(p, g, label, epgId)) continue;
             const src = sourceLabel(groupOf(first));
             const network = titleCase(networkName(first.name));
             const links = chans.map(c => ({ id: c.id, slot: (c.name || '').trim(), source: src, logo: c.logo || c.attributes?.['tvg-logo'] || null, at: start }));
@@ -1091,6 +1101,44 @@ function genericListings(byKey, g, exact) {
 // Without teams, those aren't events.
 const SLOT_SHOW_RE = /\b(?:press conference|podcast|media day|post[- ]?show|pre[- ]?show|show|talk|open mic|kickoff|playbook|in \d{2}|episode \d+)\b|^the\s/i;
 
+// Event slots can lead with the league ("NFL Raiders @ Jets", "NCAA Men's Basketball Army @ #2 Duke"), which isn't
+// part of the first team's name.
+const LEADING_LEAGUE_RE = /^(?:NFL|NBA|WNBA|NHL|MLB|MLS|NCAA(?:\s+(?:men'?s|women'?s))?(?:\s+(?:football|basketball|hockey|baseball|softball|soccer|volleyball|lacrosse))?)\s+/i;
+
+function slotTeams(title) {
+    return (matchupOf(title.replace(LEADING_LEAGUE_RE, '')) || matchupOf(title))?.teams || null;
+}
+
+// A multiview stream of several games at once ("NHL Detroit Red Wings @ Florida Panthers / Colorado Avalanche @ Chicago
+// Blackhawks") is dropped when each of its games is also listed on its own.
+const MULTIVIEW_WINDOW_MS = 3 * 3600000;
+
+function dropListedMultiviews(byKey) {
+    const singles = [...byKey.values()].filter(e => e.teams);
+    for (const [key, e] of byKey) {
+        if (e.teams) continue;
+        const parts = e.title.split(/\s\/\s/);
+        if (parts.length < 2) continue;
+        const games = parts.map(slotTeams);
+        if (!games.every(Boolean)) continue;
+        const listed = teams => singles.some(o => Math.abs(o.start - e.start) <= MULTIVIEW_WINDOW_MS && sameMatchup(o.teams, teams));
+        if (games.every(listed)) byKey.delete(key);
+    }
+}
+
+// An alternate broadcast of Monday Night Football that doesn't name the teams ("Monday Night Football With Peyton And
+// Eli") is the one NFL game ESPN lists at that time.
+const MNF_RE = /\b(?:monday night football|mnf)\b/i;
+
+function adoptAltCastGame(byKey, games) {
+    if (!games || !games.length) return;
+    for (const e of byKey.values()) {
+        if (e.teams || !MNF_RE.test(e.title) || !e.channels.length || !e.channels.every(c => c.alt)) continue;
+        const near = games.filter(g => g.sport === 'NFL' && g.state !== 'post' && Math.abs(g.start - e.start) <= SCHEDULE_WINDOW_MS);
+        if (near.length === 1) e.teams = near[0].teams.map(names => names[1]);
+    }
+}
+
 function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
@@ -1108,7 +1156,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         let entry = byKey.get(key);
         if (!entry) {
             const { network, title } = splitNetworkPrefix(titleCase(ev.title.replace(NOISE_PARENS, '').trim()));
-            const teams = matchupOf(title)?.teams || null;
+            const teams = slotTeams(title);
             if (!teams && (STUDIO_SHOW_RE.test(title) || SLOT_SHOW_RE.test(title))) continue;
             entry = {
                 id: 'iptv_ev_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16),
@@ -1131,7 +1179,9 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         entry.channels.push(link);
     }
     if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
-    dropGuideReplays(byKey, schedule, history);
+    dropListedMultiviews(byKey);
+    adoptAltCastGame(byKey, schedule);
+    dropReplays(byKey, schedule, history);
     dropPastWeeks(byKey, schedule);
     annotateWithSchedule(byKey, schedule, now);
     if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
