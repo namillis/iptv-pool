@@ -80,6 +80,7 @@ test("a repeat request within a minute fails over to the next member", () => {
   const second = pb.live(user(), 1, a, "ts", null);
   assert.strictEqual(second.member._pid, "nova");
   assert.strictEqual(second.reason, "failover");
+  assert.strictEqual(second.from, "teck", "the provider it moved off of");
   now.advance(5000);
   assert.strictEqual(pb.live(user(), 1, a, "ts", null).member._pid, "elite");
   now.advance(5000);

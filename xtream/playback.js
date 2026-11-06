@@ -161,6 +161,7 @@ class Playback {
     }
     if (failed) this.failed.set(current.key, now);
     const failover = failed;
+    const from = failed ? current.pid : null;
     const replaced = this.replacedLease(acct, user, streamId);
 
     let member = null;
@@ -199,7 +200,7 @@ class Playback {
     };
     acct.leases = acct.leases.filter((l) => l !== replaced);
     acct.leases.push(lease);
-    return { member, reason, skipped };
+    return { member, reason, skipped, from };
   }
 
   /**
