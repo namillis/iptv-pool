@@ -22,7 +22,7 @@ function event(id, title, start, channels, extra = {}) {
   return { id, title, start, end: start + 3 * HOUR, sources: ["NFL"], channels: channels.map((c) => ({ id: c, slot: c, source: "NFL" })), assumedDay: false, ...extra };
 }
 
-function fakePool() {
+function fakePool(extraEvents = []) {
   const tiles = [
     tile("t-espn", "US|ESPN", "ESPN", [m("teck", 1), m("nova", 1)], { epg: "teck/espn", logo: "http://logo/espn.png" }),
     tile("t-sky", "UK|SKYSPORTSMAINEVENT", "Sky Sports Main Event", [m("nova", 2)], { group: "UK| SPORTS" }),
@@ -35,6 +35,7 @@ function fakePool() {
     event("iptv_ev_de", "Bayern vs Dortmund", NOW - HOUR, ["t-dazn"]),
     event("iptv_ev_later", "Lakers @ Celtics", NOW + 5 * HOUR, ["t-espn"]),
     event("iptv_ev_done", "Yankees @ Red Sox", NOW - HOUR, ["t-espn"], { final: true }),
+    ...extraEvents,
   ];
   return {
     channels: tiles,
@@ -82,11 +83,10 @@ test("live and upcoming events become channels, filtered by country", () => {
   assert.strictEqual(all.entries.length, 3, "with no country filter the German game is listed too");
 });
 
-async function start(t) {
+async function start(t, pool = fakePool()) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-live-"));
   const usersFile = path.join(dir, "users.json");
   fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "fakepassword123", countries: ["US", "UK"] }] }));
-  const pool = fakePool();
   const app = express();
   app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} } }));
   const server = await new Promise((resolve) => {
@@ -96,13 +96,14 @@ async function start(t) {
   return { base: `http://127.0.0.1:${server.address().port}`, q: "username=tv1&password=fakepassword123" };
 }
 
-test("Live Now is the first category and plays through the event's channels", async (t) => {
+test("Live Sports is the first category with no TV events, and plays through the event's channels", async (t) => {
   const realNow = Date.now;
   Date.now = () => NOW;
   t.after(() => { Date.now = realNow; });
   const { base, q } = await start(t);
   const cats = await (await fetch(`${base}/player_api.php?${q}&action=get_live_categories`)).json();
-  assert.strictEqual(cats[0].category_name, "Live Now");
+  assert.strictEqual(cats[0].category_name, "Live Sports");
+  assert.ok(!cats.some((c) => c.category_name === "Popular on TV"), "an empty list is left out");
   const all = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
   assert.deepStrictEqual(all.slice(0, 2).map((s) => s.name), ["Bills @ Chiefs", "Arsenal vs Chelsea · 7:30 PM EDT"]);
   assert.ok(all.some((s) => s.name === "ESPN"), "the normal channels follow");
@@ -118,6 +119,22 @@ test("Live Now is the first category and plays through the event's channels", as
   assert.strictEqual((await go(0)).headers.get("location"), "http://teck.example/live/u/p/4.ts");
   assert.strictEqual((await go(1)).headers.get("location"), "http://teck.example/live/u/p/1.ts", "next in order: ESPN on teck");
   assert.strictEqual((await go(2)).headers.get("location"), "http://elite.example/live/u/p/4.ts");
+});
+
+test("Popular on TV comes before Live Sports and has only the TV events", async (t) => {
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  t.after(() => { Date.now = realNow; });
+  const traitors = event("iptv_ev_tv", "The Traitors", NOW - 10 * 60000, ["t-cbs"], { category: "TV", importance: 24 });
+  const { base, q } = await start(t, fakePool([traitors]));
+  const cats = await (await fetch(`${base}/player_api.php?${q}&action=get_live_categories`)).json();
+  assert.deepStrictEqual(cats.slice(0, 2).map((c) => c.category_name), ["Popular on TV", "Live Sports"]);
+  const all = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
+  assert.deepStrictEqual(all.slice(0, 3).map((s) => [s.name, s.num]), [["The Traitors", 1], ["Bills @ Chiefs", 2], ["Arsenal vs Chelsea · 7:30 PM EDT", 3]]);
+  const tv = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${cats[0].category_id}`)).json();
+  assert.deepStrictEqual(tv.map((s) => s.name), ["The Traitors"]);
+  const sports = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${cats[1].category_id}`)).json();
+  assert.deepStrictEqual(sports.map((s) => s.name), ["Bills @ Chiefs", "Arsenal vs Chelsea · 7:30 PM EDT"]);
 });
 
 test("an event with many channels keeps places for its alternate broadcasts at the end", () => {

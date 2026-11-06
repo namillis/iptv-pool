@@ -4,7 +4,7 @@ const zlib = require("zlib");
 const express = require("express");
 const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../siteAuth");
 const { XtreamIds } = require("./ids");
-const { buildEvents, LIVE_NOW } = require("./events");
+const { buildEvents, LIVE_SPORTS, POPULAR_TV } = require("./events");
 const { Playback, memberUrl, convertStart, memberKey } = require("./playback");
 const { ArchiveMemory } = require("./archive");
 const LRUCache = require("../lruCache");
@@ -34,6 +34,7 @@ const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
+const POPULAR_TV_KEY = "\u0000POPULAR TV";
 const HOME_KEY = "\u0000HOME|";
 const POOL_API_VERSION = 1;
 const POOL_FEATURES = ["retry", "stop", "sources", "event_info"];
@@ -216,33 +217,44 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
 }
 
 /**
- * The Live Now layer on top of [view]: the current events as a first category, rebuilt at most
- * every [EVENTS_TTL_MS] because events start, end and change state through the day. When there
- * are no events, the responses are the view's own.
+ * The live events layer on top of [view]: Popular on TV and Live Sports as the first two categories, rebuilt at most
+ * every [EVENTS_TTL_MS] because events start, end and change state through the day. A list with no events is left
+ * out, and when both are empty the responses are the view's own.
  */
 function buildLive(pool, ids, view, countries, now = Date.now()) {
-  const categoryId = ids.categoryId(LIVE_NOW_KEY);
-  let events = { entries: [], byStreamId: new Map() };
-  if (typeof pool.liveEventIndex === "function") {
+  const lists = [
+    { kind: "tv", name: POPULAR_TV, categoryId: ids.categoryId(POPULAR_TV_KEY) },
+    // Live Sports keeps the old Live Now key, so its category id doesn't change.
+    { kind: "sports", name: LIVE_SPORTS, categoryId: ids.categoryId(LIVE_NOW_KEY) },
+  ];
+  const byStreamId = new Map();
+  const taken = new Set();
+  let firstNum = 1;
+  for (const l of lists) {
+    l.entries = [];
+    if (typeof pool.liveEventIndex !== "function") continue;
     try {
-      events = buildEvents(pool, { countries, categoryId, tileCountry, homeCountry: view.homeCountry, now });
+      const events = buildEvents(pool, { countries, categoryId: l.categoryId, categoryName: l.name, kind: l.kind, tileCountry, homeCountry: view.homeCountry, now, taken, firstNum });
+      l.entries = events.entries;
+      for (const [id, tile] of events.byStreamId) byStreamId.set(id, tile);
     } catch (e) {
-      console.error(`[XTREAM] Live Now failed: ${e.message}`);
+      console.error(`[XTREAM] ${l.name} failed: ${e.message}`);
     }
+    firstNum += l.entries.length;
   }
-  if (!events.entries.length) {
-    return { at: now, count: 0, byStreamId: events.byStreamId, categoryId: String(categoryId), categoriesGz: view.categoriesGz, streamsGz: view.streamsGz, eventsGz: null };
+  const shown = lists.filter((l) => l.entries.length);
+  if (!shown.length) {
+    return { at: now, count: 0, byStreamId, categoriesGz: view.categoriesGz, streamsGz: view.streamsGz, eventsByCategory: new Map() };
   }
   const gz = (value) => zlib.gzipSync(JSON.stringify(value));
-  const list = events.entries.map((e) => e.stream);
+  const streamsOf = (l) => l.entries.map((e) => e.stream);
   return {
     at: now,
-    count: list.length,
-    byStreamId: events.byStreamId,
-    categoryId: String(categoryId),
-    categoriesGz: gz([{ category_id: String(categoryId), category_name: LIVE_NOW, parent_id: 0 }, ...view.categoryList]),
-    streamsGz: gz([...list, ...view.streamList]),
-    eventsGz: gz(list),
+    count: shown.reduce((n, l) => n + l.entries.length, 0),
+    byStreamId,
+    categoriesGz: gz([...shown.map((l) => ({ category_id: String(l.categoryId), category_name: l.name, parent_id: 0 })), ...view.categoryList]),
+    streamsGz: gz([...shown.flatMap(streamsOf), ...view.streamList]),
+    eventsByCategory: new Map(lists.map((l) => [String(l.categoryId), l.entries.length ? gz(streamsOf(l)) : null])),
   };
 }
 
@@ -364,7 +376,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, l
     const now = Date.now();
     if (!view.live || now - view.live.at >= EVENTS_TTL_MS) {
       view.live = buildLive(pool, ids, view, user.countries, now);
-      if (view.live.count) log.log(`[XTREAM] Live Now "${user.countries.join(",") || "all"}": ${view.live.count} events, ${Date.now() - now} ms`);
+      if (view.live.count) log.log(`[XTREAM] Live events "${user.countries.join(",") || "all"}": ${view.live.count} events, ${Date.now() - now} ms`);
     }
     return view.live;
   }
@@ -634,7 +646,10 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, l
       const live = liveFor(pool, view, user);
       const cat = req.query.category_id ?? req.body?.category_id;
       if (cat === undefined || cat === "" || cat === "*") return sendGzip(req, res, live.streamsGz, json);
-      if (String(cat) === live.categoryId) return live.eventsGz ? sendGzip(req, res, live.eventsGz, json) : res.json([]);
+      if (live.eventsByCategory.has(String(cat))) {
+        const events = live.eventsByCategory.get(String(cat));
+        return events ? sendGzip(req, res, events, json) : res.json([]);
+      }
       const body = view.categoryStreams.get(String(cat));
       return body ? sendGzip(req, res, body, json) : res.json([]);
     }

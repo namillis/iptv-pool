@@ -1,7 +1,8 @@
 const crypto = require("crypto");
 const { currentEvents, eventState, categoryOf } = require("../liveEvents");
 
-const LIVE_NOW = "Live Now";
+const LIVE_SPORTS = "Live Sports";
+const POPULAR_TV = "Popular on TV";
 const EVENT_BASE = 1_000_000_000;
 const EVENT_SPAN = 2 ** 27;
 const MEMBERS_MAX = 15;
@@ -111,19 +112,18 @@ function poolEvent(e) {
 }
 
 /**
- * The pool's live and upcoming events (the Stremio "Live Now" list) as virtual channels for the
+ * The pool's live and upcoming events of one [kind] (the Stremio "Popular on TV" or "Live Sports" list) as virtual channels for the
  * Xtream login. Each one plays the event's ranked channels in order, so the usual failover walks
  * through them. Channels outside the login's [countries] are left out, and an event with none left
  * is dropped. The guide id is the first ranked channel that has guide data, so the guide shows
  * what that channel is airing. With a [homeCountry], events on one of its channels come first.
  */
-function buildEvents(pool, { countries = [], categoryId, tileCountry, homeCountry = null, now = Date.now() }) {
+function buildEvents(pool, { countries = [], categoryId, categoryName, kind = null, tileCountry, homeCountry = null, now = Date.now(), taken = new Set(), firstNum = 1 }) {
   const wanted = countries.length ? new Set(countries) : null;
   const entries = [];
   const away = [];
   const byStreamId = new Map();
-  const taken = new Set();
-  for (const e of currentEvents(pool.liveEventIndex(), now)) {
+  for (const e of currentEvents(pool.liveEventIndex(), now, { kind })) {
     const picked = pool.eventChannels(e)
       .map((ch) => ({ tile: pool.tileById.get(ch.id), alt: !!ch.alt }))
       .filter(({ tile }) => tile && (!wanted || wanted.has(tileCountry(tile._key))));
@@ -146,7 +146,7 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, homeCountr
       logo: tiles.find((t) => t.logo)?.logo || null,
       _members: members,
       _primary: members,
-      _groups: [LIVE_NOW],
+      _groups: [categoryName],
       _epg: epgKey,
       _catchup: null,
       archiveDays: 0,
@@ -174,8 +174,8 @@ function buildEvents(pool, { countries = [], categoryId, tileCountry, homeCountr
     byStreamId.set(id, tile);
   }
   entries.push(...away);
-  entries.forEach((e, i) => { e.stream.num = i + 1; });
+  entries.forEach((e, i) => { e.stream.num = firstNum + i; });
   return { entries, byStreamId };
 }
 
-module.exports = { buildEvents, eventNumber, interleave, poolEvent, LIVE_NOW, EVENT_BASE };
+module.exports = { buildEvents, eventNumber, interleave, poolEvent, LIVE_SPORTS, POPULAR_TV, EVENT_BASE };
