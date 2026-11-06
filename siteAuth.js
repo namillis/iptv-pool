@@ -7,6 +7,7 @@ const PROTECTED_PATHS = [
   /^\/[^/]+\/configure(-direct|-xtream|-data\.json)?\/?$/,
   /^\/api\//,
   /^\/encrypt\/?$/,
+  /^\/dashboard(?:\/|$)/,
 ];
 
 const MAX_FAILURES = 10;

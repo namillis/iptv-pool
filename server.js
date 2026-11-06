@@ -375,6 +375,32 @@ if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
   }
 }
 
+// Pool dashboard: provider status and play metrics. It sits behind the site password, and without one it's off.
+app.get("/dashboard", (req, res) => {
+  if (!sitePasswordEnabled() || !POOL_ENABLED) return res.status(404).json({ error: "Not found" });
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(path.join(staticDir, "html", "dashboard.html"));
+});
+
+app.get("/dashboard/data.json", async (req, res) => {
+  if (!sitePasswordEnabled() || !POOL_ENABLED) return res.status(404).json({ error: "Not found" });
+  const hours = Math.min(720, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  try {
+    const iface = await poolInterface();
+    const zone = iface.pool?.timezone || "America/New_York";
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      now: Date.now(),
+      zone,
+      pool: await iface.poolStatus(),
+      metrics: poolMetrics ? poolMetrics.data(hours) : { hours, plays: 0, checks: 0, providers: [], logins: [], channels: [], hourly: [] },
+    });
+  } catch (e) {
+    console.error("[DASHBOARD] Data failed:", e.message);
+    res.status(500).json({ error: "Dashboard data failed" });
+  }
+});
+
 // Token interface middleware
 app.use("/:token", async (req, res, next) => {
   const { token } = req.params;
