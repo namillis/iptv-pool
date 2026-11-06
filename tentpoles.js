@@ -1,8 +1,8 @@
 // Once-a-year (or once-in-a-while) broadcasts that rank above everything else on TV, whatever their show type.
-// [pattern, label, score]. Matched against the show name, the episode name and guide titles.
+// [pattern, label, score, election]. Matched against the show name, the episode name and guide titles.
 const TENTPOLES = [
     [/\b(?:oscars|academy awards)\b/i, 'Oscars', 70],
-    [/\belection (?:night|day|results|coverage|center|headquarters)\b|\b(?:america|decision) (?:decides|20\d\d)\b|\belection night in america\b/i, 'Election night', 70],
+    [/\belection (?:night|day|results|coverage|center|headquarters)\b|\b(?:america|decision) (?:decides|20\d\d)\b|\belection night in america\b/i, 'Election night', 70, true],
     [/\bpresidential debate\b|\bvice[- ]presidential debate\b/i, 'Presidential debate', 65],
     [/\bstate of the union\b/i, 'State of the Union', 60],
     [/\binaugurat(?:ion|al)\b/i, 'Inauguration', 65],
@@ -28,11 +28,33 @@ const TENTPOLES = [
     [/\bcoronation\b|\broyal wedding\b|\bpapal (?:inauguration|conclave)\b|\bconclave\b/i, 'Royal or papal event', 55]
 ];
 
-function tentpoleOf(...texts) {
+const etDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+
+/** The US general election is the Tuesday after the first Monday in November (the 2nd to the 8th). */
+function electionDay(year) {
+    const nov1 = new Date(Date.UTC(year, 10, 1)).getUTCDay();
+    const firstMonday = 1 + ((8 - nov1) % 7);
+    return firstMonday + 1;
+}
+
+/** Whether [ms] is on the US election day or the day after, Eastern time. */
+function inElectionWindow(ms) {
+    const [y, m, d] = etDay.format(new Date(ms)).split('-').map(Number);
+    if (m !== 11) return false;
+    const day = electionDay(y);
+    return d === day || d === day + 1;
+}
+
+/**
+ * The tentpole a listing airing at [at] is, or null. Election coverage only counts on election day and the day
+ * after, so a station's leftover count coverage later in the week isn't ranked with the Oscars.
+ */
+function tentpoleOf(at, ...texts) {
     const text = texts.filter(Boolean).join(' | ');
     if (!text) return null;
     const hit = TENTPOLES.find(([re]) => re.test(text));
-    return hit ? { label: hit[1], score: hit[2] } : null;
+    if (!hit || (hit[3] && !inElectionWindow(at))) return null;
+    return { label: hit[1], score: hit[2], ...(hit[3] ? { election: true } : {}) };
 }
 
-module.exports = { tentpoleOf, TENTPOLES };
+module.exports = { tentpoleOf, inElectionWindow, TENTPOLES };
