@@ -316,7 +316,7 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
+function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const archives = new ArchiveMemory(archiveFile, { now, log });
@@ -699,10 +699,12 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, l
     const { user, pool, tile } = found;
     let status = await accountStatus(pool);
     if (playback.firstChoiceFull(user, streamId, tile, status)) status = await accountStatus(pool, { fresh: true });
-    const pick = playback.live(user, streamId, tile, ext, status, playbackSignal(req.query));
+    const signal = playbackSignal(req.query);
+    const pick = playback.live(user, streamId, tile, ext, status, signal);
     const url = pick && memberUrl(pick.member, ext);
     if (!url) return res.status(404).json({ error: "Not found" });
     log.log(`[XTREAM] ${user.username} live ${streamId} "${tile.name}" -> ${pick.member._pid} (${pick.reason})`);
+    if (metrics) metrics.play({ user: user.username, streamId, channel: tile.name, pid: pick.member._pid, reason: pick.reason, from: pick.from, attempt: signal ? signal.attempt : null });
     return redirect(res, url);
   });
 
@@ -741,6 +743,30 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, getPool, l
   router.flush = () => {
     ids.flush();
     archives.flush();
+  };
+
+  /** Records each provider's account and refresh state, and how many streams the pool's logins hold on it. */
+  router.recordAccounts = async () => {
+    if (!metrics) return;
+    const { pool } = await getPool();
+    const status = await refreshStatus(pool);
+    const t = Date.now();
+    playback.prune(t);
+    const leases = new Map();
+    for (const acct of playback.accounts.values()) for (const l of acct.leases) leases.set(l.pid, (leases.get(l.pid) || 0) + 1);
+    for (const child of pool.children) {
+      const a = status.get(child.poolId);
+      metrics.account({
+        pid: child.poolId,
+        status: a ? (a.error ? `check failed: ${a.error}` : a.status) : "playlist",
+        used: a && !a.error ? Number(a.activeConnections ?? 0) : null,
+        max: a && !a.error ? Number(a.maxConnections || 0) || null : null,
+        expires: a && !a.error ? a.expiresAt || null : null,
+        channels: child.channels.length,
+        leases: leases.get(child.poolId) || 0,
+        refreshError: child.retryAt > t ? child.lastError || "refresh failed" : null,
+      });
+    }
   };
 
   /**

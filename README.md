@@ -380,6 +380,8 @@ https://yourname.duckdns.org/pool-<POOL_KEY>/manifest.json
 
 The page shows no logins or URLs.
 
+`https://yourname.duckdns.org/pool-<POOL_KEY>/metrics` (add `?hours=N`, up to 720) shows what the Xtream logins played over the last 24 hours. It lists each provider's picks and failovers (plays a retry moved off it), how often its account was full, and how often it was full with no pool stream on it, which means the login is in use outside the pool. It also shows refresh errors and channel counts, plays per login, the channels that failed over most, and an hourly trend. Every live play and a check of every account every 15 minutes are kept as JSON lines in `xtream-data/metrics/<day>.jsonl` for 30 days, so they survive a redeploy. The metrics only cover the Xtream logins, since Stremio streams don't go through the pool.
+
 The key is the only thing protecting your provider logins, so treat that link like a password. A wrong key gets a 404. The pool has its own addon ID, so it can be installed next to a regular install. It has no Configure page: edit `providers.json` and run `docker compose restart iptv` instead. `providers.json` is listed in `.gitignore` and `.dockerignore`, so it can't end up in the repo or the image.
 
 **Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB, and merging adds about 5 MB per 10,000 channels. Providers with large movie and series libraries add more.

@@ -19,6 +19,7 @@ const { sitePassword, sitePasswordEnabled } = require("./siteAuth");
 const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
 const { createPoolAddon } = require("./providerPool");
 const { createXtreamRouter } = require("./xtream/api");
+const { PoolMetrics } = require("./xtream/metrics");
 const { getSchedule } = require("./espnSchedule");
 const { getTvSchedule } = require("./tvSchedule");
 const fs = require("fs");
@@ -347,16 +348,22 @@ app.get("/:token/configure-xtream", (req, res) => {
 });
 
 const XTREAM_USERS_FILE = process.env.XTREAM_USERS_FILE || "";
+const ACCOUNT_METRICS_MS = 15 * 60000;
 let xtreamRouter = null;
+let poolMetrics = null;
 if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
   try {
     const dataDir = process.env.XTREAM_DATA_DIR || path.join(__dirname, "xtream-data");
+    poolMetrics = new PoolMetrics(path.join(dataDir, "metrics"));
     const router = createXtreamRouter({
       usersFile: XTREAM_USERS_FILE,
       idsFile: path.join(dataDir, "xtream-ids.json"),
       archiveFile: path.join(dataDir, "xtream-archive.json"),
+      metrics: poolMetrics,
       getPool: poolInterface,
     });
+    // Account checks run on a timer, not only during playback, so an account that fills up while nobody watches shows.
+    setInterval(() => router.recordAccounts().catch((e) => console.error("[METRICS] Account check failed:", e.message)), ACCOUNT_METRICS_MS).unref();
     app.use(router);
     xtreamRouter = router;
     const flush = () => router.flush();
@@ -519,6 +526,21 @@ app.get("/:token/report", async (req, res) => {
   } catch (e) {
     console.error("[POOL] Report failed:", e.message);
     res.status(500).json({ error: "Report failed" });
+  }
+});
+
+// Provider pool metrics: plays, failovers and account checks over the last ?hours= (default 24, up to 30 days)
+app.get("/:token/metrics", (req, res) => {
+  const iface = req.addonInterface;
+  if (!iface || !iface.isPool || !poolMetrics) return res.status(404).json({ error: "Not found" });
+  const hours = Math.min(720, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  try {
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(poolMetrics.summary(hours, iface.pool?.timezone || "America/New_York"));
+  } catch (e) {
+    console.error("[METRICS] Summary failed:", e.message);
+    res.status(500).json({ error: "Metrics failed" });
   }
 });
 
