@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV Pool</title>
+<style>
+  :root {
+    --paper: #f7f3ea; --ink: #1a1a1a; --muted: #6b665c; --rule: #cfc8b8;
+    --good: #2e7d32; --warn: #b26a00; --bad: #c62828; --link: #1f5fa8;
+    --bar: #1f5fa8; --bar-warn: #e09a1a; --bar-bad: #c62828;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.45 Georgia, "Times New Roman", serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { border-bottom: 3px double var(--ink); padding-bottom: 10px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 24px; }
+  h1 { font-size: 40px; margin: 0; letter-spacing: -0.5px; }
+  .stamp { color: var(--muted); font-size: 13px; flex: 1; }
+  nav a { color: var(--link); text-decoration: none; margin-left: 14px; font-size: 14px; padding-bottom: 2px; }
+  nav a.on { color: var(--ink); border-bottom: 2px solid var(--ink); font-weight: bold; }
+  h2 { font-size: 20px; margin: 34px 0 6px; border-bottom: 1px solid var(--ink); padding-bottom: 4px; }
+  .note { color: var(--muted); font-size: 13px; margin: 4px 0 10px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); border-bottom: 1px solid var(--rule); }
+  .kpi { padding: 14px 12px 12px; border-right: 1px solid var(--rule); }
+  .kpi:last-child { border-right: 0; }
+  .kpi .v { font-size: 30px; font-weight: bold; }
+  .kpi .l { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+  .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  ul.alerts { list-style: none; padding: 0; margin: 0; }
+  ul.alerts li { padding: 7px 0; border-bottom: 1px solid var(--rule); }
+  ul.alerts li b { margin-right: 6px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th { text-align: left; font-weight: normal; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border-bottom: 1px solid var(--ink); padding: 6px 8px; white-space: nowrap; }
+  td { padding: 7px 6px; border-bottom: 1px solid var(--rule); vertical-align: middle; white-space: nowrap; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  td.wrap { white-space: normal; }
+  .meter { display: inline-block; width: 50px; height: 8px; background: #e6dfcf; vertical-align: middle; margin-right: 6px; }
+  .meter i { display: block; height: 100%; }
+  svg text { font: 11px Georgia, serif; fill: var(--muted); }
+  .legend span { display: inline-block; margin-right: 14px; font-size: 13px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+  .heat td { text-align: center; font-size: 12px; padding: 5px 4px; border-bottom: 1px solid var(--paper); }
+  .heat th { border-bottom: 0; }
+  .err { padding: 30px 0; color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>IPTV Pool</h1>
+    <div class="stamp" id="stamp">Loading…</div>
+    <nav id="ranges"><a data-h="24" href="#">24 hours</a><a data-h="168" href="#">7 days</a><a data-h="720" href="#">30 days</a></nav>
+  </header>
+  <div id="app"></div>
+</main>
+<script>
+(() => {
+  let hours = Number(new URLSearchParams(location.search).get("hours")) || 24;
+  const app = document.getElementById("app");
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const num = (n) => (n === null || n === undefined ? "–" : Number(n).toLocaleString("en-US"));
+  const pct = (a, b) => (b ? Math.round((100 * a) / b) : null);
+  const DAY = 86400000;
+
+  function rangeLabel(h) { return h >= 720 ? "30 days" : h >= 168 ? "7 days" : `${h} hours`; }
+  function fmt(ms, zone, opts = {}) {
+    return ms ? new Date(ms).toLocaleString("en-US", { timeZone: zone, month: "short", day: "numeric", hour: "numeric", minute: "2-digit", ...opts }) : "never";
+  }
+  function daysLeft(expires, now) { return expires ? Math.floor((Date.parse(expires) - now) / DAY) : null; }
+  function expiryClass(d) { return d === null ? "muted" : d <= 14 ? "bad" : d <= 30 ? "warn" : "good"; }
+  function rateClass(p, n) { return p === null || n < 5 ? "" : p >= 30 ? "bad" : p >= 15 ? "warn" : "good"; }
+
+  function meter(used, max) {
+    if (!max) return `<span class="muted">${used ?? "?"} / ?</span>`;
+    const f = Math.min(1, (used || 0) / max);
+    const color = f >= 1 ? "var(--bar-bad)" : f >= 0.67 ? "var(--bar-warn)" : "var(--good)";
+    return `<span class="meter"><i style="width:${Math.round(f * 100)}%;background:${color}"></i></span>${used ?? 0} / ${max}`;
+  }
+
+  // Connections in use over the range: a step line of used against max, red where it was full.
+  function spark(series, since, now) {
+    const w = 110, h = 24;
+    const pts = series.filter((s) => s[2]);
+    if (!pts.length) return '<span class="muted">no checks yet</span>';
+    const x = (t) => ((t - since) / (now - since)) * w;
+    const max = Math.max(...pts.map((s) => s[2]));
+    const y = (v) => h - 2 - ((v || 0) / max) * (h - 4);
+    let d = "";
+    pts.forEach((s, i) => { d += `${i ? "H" + x(s[0]).toFixed(1) + "V" : "M" + x(s[0]).toFixed(1) + " "}${y(s[1]).toFixed(1)}`; });
+    d += `H${x(now).toFixed(1)}`;
+    const full = pts.filter((s) => s[1] >= s[2]).map((s) => `<rect x="${(x(s[0]) - 1).toFixed(1)}" y="0" width="3" height="${h}" fill="var(--bar-bad)" opacity="0.25"/>`).join("");
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${full}<line x1="0" x2="${w}" y1="${y(max)}" y2="${y(max)}" stroke="var(--rule)" stroke-dasharray="2 2"/><path d="${d}" fill="none" stroke="var(--ink)" stroke-width="1.3"/></svg>`;
+  }
+
+  function hourlyChart(hourly, zone) {
+    const w = 1140, h = 170, pad = 28;
+    const n = hourly.length;
+    const max = Math.max(1, ...hourly.map((b) => b.plays));
+    const bw = (w - pad) / n;
+    const y = (v) => ((h - 22) * v) / max;
+    let bars = "";
+    hourly.forEach((b, i) => {
+      const x = pad + i * bw;
+      const ok = Math.max(0, b.plays - b.failovers - b.allBusy);
+      let top = h - 18;
+      for (const [v, c] of [[ok, "var(--bar)"], [b.failovers, "var(--bar-warn)"], [b.allBusy, "var(--bar-bad)"]]) {
+        if (!v) continue;
+        const bh = y(v);
+        top -= bh;
+        bars += `<rect x="${(x + 0.5).toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(1, bw - 1).toFixed(1)}" height="${bh.toFixed(1)}" fill="${c}"><title>${esc(fmt(b.t, zone))}: ${b.plays} plays, ${b.failovers} failovers, ${b.allBusy} all busy</title></rect>`;
+      }
+    });
+    const every = Math.ceil(n / 12);
+    let labels = "";
+    hourly.forEach((b, i) => {
+      if (i % every) return;
+      const label = n > 48 ? fmt(b.t, zone, { hour: undefined, minute: undefined }) : new Date(b.t).toLocaleString("en-US", { timeZone: zone, hour: "numeric" });
+      labels += `<text x="${(pad + i * bw).toFixed(1)}" y="${h - 4}">${esc(label)}</text>`;
+    });
+    return `<svg viewBox="0 0 ${w} ${h}" width="100%" preserveAspectRatio="none" style="height:${h}px">
+      <line x1="${pad}" x2="${w}" y1="${h - 18}" y2="${h - 18}" stroke="var(--ink)"/>
+      <text x="0" y="12">${max}</text><line x1="${pad}" x2="${w}" y1="${h - 18 - y(max)}" y2="${h - 18 - y(max)}" stroke="var(--rule)" stroke-dasharray="2 3"/>
+      ${bars}${labels}</svg>`;
+  }
+
+  function alerts(pool, m, now) {
+    const out = [];
+    const byId = new Map(m.providers.map((p) => [p.id, p]));
+    for (const p of pool.providers) {
+      const a = p.account;
+      if (p.refreshError) out.push(["bad", p.name, `channel refresh is failing (${p.refreshError}).`]);
+      if (a && a.error) out.push(["bad", p.name, `account check failed: ${a.error}.`]);
+      else if (a && a.status && !/active/i.test(a.status)) out.push(["bad", p.name, `account status is ${a.status}.`]);
+      const d = a && !a.error ? daysLeft(a.expires, now) : null;
+      if (d !== null && d <= 30) out.push([d <= 14 ? "bad" : "warn", p.name, `expires in ${d} days (${a.expires.slice(0, 10)}).`]);
+      const mp = byId.get(p.id);
+      if (mp && mp.last && mp.last.max && mp.last.used >= mp.last.max && !mp.last.own) out.push(["warn", p.name, "is full with no pool stream on it, so someone outside the pool is using the login."]);
+      else if (mp && mp.checks >= 4 && pct(mp.outside, mp.checks) >= 25) out.push(["warn", p.name, `was full with no pool stream on it in ${pct(mp.outside, mp.checks)}% of checks.`]);
+      const fr = mp ? pct(mp.failed, mp.picked) : null;
+      if (mp && mp.picked >= 5 && fr >= 30) out.push(["bad", p.name, `${fr}% of its plays failed over to another provider.`]);
+      if (mp && mp.minChannels !== null && mp.maxChannels && mp.minChannels < mp.maxChannels * 0.8) out.push(["warn", p.name, `channel count dropped from ${num(mp.maxChannels)} to ${num(mp.minChannels)} in this range.`]);
+    }
+    for (const c of m.channels.filter((c) => c.failedOn.length >= 3)) out.push(["warn", c.channel, `failed over on ${c.failedOn.length} providers (${c.failedOn.join(", ")}).`]);
+    return out.sort((a, b) => (a[0] === b[0] ? 0 : a[0] === "bad" ? -1 : 1));
+  }
+
+  function render(d) {
+    const { pool, metrics: m, zone, now } = d;
+    const since = now - m.hours * 3600000;
+    const byId = new Map(m.providers.map((p) => [p.id, p]));
+    const healthy = pool.providers.filter((p) => !p.refreshError && p.account && !p.account.error && /active/i.test(p.account.status || "")).length;
+    const fullNow = pool.providers.filter((p) => p.account && p.account.max && p.account.used >= p.account.max).length;
+    const plays = m.hourly.reduce((s, h) => s + h.plays, 0);
+    const fails = m.hourly.reduce((s, h) => s + h.failovers, 0);
+    const busy = m.hourly.reduce((s, h) => s + h.allBusy, 0);
+    const failRate = pct(fails, plays);
+    const soonest = pool.providers.filter((p) => p.account && p.account.expires).map((p) => ({ p, d: daysLeft(p.account.expires, now) })).sort((a, b) => a.d - b.d)[0];
+    const list = alerts(pool, m, now);
+
+    document.getElementById("stamp").textContent = `${pool.providers.length} providers · ${num(pool.members)} channels merged into ${num(pool.channels)} · updated ${fmt(now, zone)}, refreshes every minute`;
+    for (const a of document.querySelectorAll("#ranges a")) a.classList.toggle("on", Number(a.dataset.h) === m.hours);
+
+    app.innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><div class="v ${healthy === pool.providers.length ? "good" : "bad"}">${healthy}/${pool.providers.length}</div><div class="l">Providers healthy</div></div>
+        <div class="kpi"><div class="v ${fullNow ? "warn" : "good"}">${fullNow}</div><div class="l">Accounts full now</div></div>
+        <div class="kpi"><div class="v">${num(plays)}</div><div class="l">Plays, ${rangeLabel(m.hours)}</div></div>
+        <div class="kpi"><div class="v ${rateClass(failRate, plays)}">${failRate === null ? "–" : failRate + "%"}</div><div class="l">Failover rate</div></div>
+        <div class="kpi"><div class="v ${busy ? "bad" : "good"}">${num(busy)}</div><div class="l">All providers busy</div></div>
+        <div class="kpi"><div class="v ${soonest ? expiryClass(soonest.d) : "muted"}">${soonest ? soonest.d + "d" : "–"}</div><div class="l">Next expiry${soonest ? ": " + esc(soonest.p.name) : ""}</div></div>
+      </div>
+
+      <h2>Needs attention</h2>
+      ${list.length ? `<ul class="alerts">${list.map(([c, who, what]) => `<li class="${c}"><b>${esc(who)}</b><span style="color:var(--ink)">${esc(what)}</span></li>`).join("")}</ul>` : '<p class="good">Nothing right now.</p>'}
+
+      <h2>Providers</h2>
+      <p class="note">Connections and expiry are live (checked ${esc(fmt(pool.checkedAt, zone))}); hover a status for the last channel refresh. History is connections in use over the range, red where the account was full. Picks, failovers and history cover the last ${rangeLabel(m.hours)}. "Outside" is how often the account was full with none of the pool's streams on it.</p>
+      <div class="scroll"><table>
+        <tr><th>Provider</th><th>Status</th><th>Connections</th><th>History</th><th class="n">Expires</th><th class="n">Channels</th><th class="n">Only here</th><th class="n">Picks</th><th class="n">Failed over</th><th class="n">Full</th><th class="n">Outside</th></tr>
+        ${pool.providers.map((p) => {
+          const a = p.account || {};
+          const mp = byId.get(p.id) || { picked: 0, failed: 0, checks: 0, full: 0, outside: 0, series: [] };
+          const d = daysLeft(a.expires, now);
+          const fr = pct(mp.failed, mp.picked);
+          const status = p.refreshError ? `<span class="bad" title="${esc(p.refreshError)}">refresh failing: ${esc(p.refreshError)}</span>` : a.error ? `<span class="bad">check failed</span>` : a.status ? `<span class="${/active/i.test(a.status) ? "good" : "bad"}">${esc(a.status)}${a.trial ? " (trial)" : ""}</span>` : '<span class="muted">playlist</span>';
+          return `<tr>
+            <td><b>${esc(p.name)}</b> <span class="muted">${esc(p.id)}</span></td>
+            <td title="Channels refreshed ${esc(fmt(p.lastRefresh, zone))}">${status}</td>
+            <td>${a.error ? "–" : meter(a.used, a.max)}</td>
+            <td>${spark(mp.series, since, now)}</td>
+            <td class="n ${expiryClass(d)}">${a.expires ? `${esc(a.expires.slice(0, 10))} <span class="muted">(${d}d)</span>` : "–"}</td>
+            <td class="n">${num(p.channels)}</td>
+            <td class="n ${p.onlyHere ? "" : "warn"}">${num(p.onlyHere)}</td>
+            <td class="n">${num(mp.picked)}</td>
+            <td class="n ${rateClass(fr, mp.picked)}">${num(mp.failed)}${fr === null ? "" : ` <span class="muted">(${fr}%)</span>`}</td>
+            <td class="n">${mp.checks ? pct(mp.full, mp.checks) + "%" : "–"}</td>
+            <td class="n ${mp.checks && pct(mp.outside, mp.checks) >= 25 ? "warn" : ""}">${mp.checks ? pct(mp.outside, mp.checks) + "%" : "–"}</td>
+          </tr>`;
+        }).join("")}
+      </table></div>
+
+      <h2>Plays by hour</h2>
+      <p class="legend"><span><i style="background:var(--bar)"></i>played</span><span><i style="background:var(--bar-warn)"></i>failed over</span><span><i style="background:var(--bar-bad)"></i>all providers busy</span></p>
+      ${plays ? hourlyChart(m.hourly, zone) : '<p class="muted">No plays in this range yet.</p>'}
+
+      <h2>Channels that failed over</h2>
+      ${m.channels.length ? `<div class="scroll"><table>
+        <tr><th>Channel</th><th class="n">Plays</th><th class="n">Failovers</th><th class="n">All busy</th><th>Failed on</th></tr>
+        ${m.channels.map((c) => `<tr><td class="wrap">${esc(c.channel)}</td><td class="n">${num(c.plays)}</td><td class="n warn">${num(c.failovers)}</td><td class="n ${c.allBusy ? "bad" : ""}">${num(c.allBusy)}</td><td class="wrap">${esc(c.failedOn.join(", "))}</td></tr>`).join("")}
+      </table></div>` : '<p class="good">None in this range.</p>'}
+
+      <h2>TVs</h2>
+      ${m.logins.length ? `<table>
+        <tr><th>Login</th><th class="n">Plays</th><th class="n">Failovers</th><th class="n">All busy</th></tr>
+        ${m.logins.map((l) => `<tr><td>${esc(l.user)}</td><td class="n">${num(l.plays)}</td><td class="n">${num(l.failovers)}</td><td class="n ${l.allBusy ? "bad" : ""}">${num(l.allBusy)}</td></tr>`).join("")}
+      </table>` : '<p class="muted">No plays in this range yet.</p>'}
+
+      <h2>Channel overlap</h2>
+      <p class="note">Share of the row provider's channels that the column provider also has. A row near 100% means that provider adds almost nothing of its own.</p>
+      <div class="scroll"><table class="heat">
+        <tr><th></th>${pool.overlap.ids.map((id) => `<th>${esc(id)}</th>`).join("")}</tr>
+        ${pool.overlap.ids.map((id, i) => `<tr><th>${esc(id)}</th>${pool.overlap.rows[i].map((v) => v === null ? '<td class="muted">–</td>' : `<td style="background:rgba(31,95,168,${(v / 100) * 0.75});color:${v >= 55 ? "#fff" : "var(--ink)"}">${v}%</td>`).join("")}</tr>`).join("")}
+      </table></div>`;
+  }
+
+  async function load() {
+    try {
+      const res = await fetch(`/dashboard/data.json?hours=${hours}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      render(await res.json());
+    } catch (e) {
+      app.innerHTML = `<p class="err">Couldn't load the pool data (${esc(e.message)}). It retries every minute.</p>`;
+    }
+  }
+
+  for (const a of document.querySelectorAll("#ranges a")) {
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      hours = Number(a.dataset.h);
+      history.replaceState(null, "", `?hours=${hours}`);
+      load();
+    });
+  }
+  load();
+  setInterval(load, 60000);
+})();
+</script>
+</body>
+</html>

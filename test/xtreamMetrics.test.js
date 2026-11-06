@@ -55,3 +55,16 @@ test("events older than the window are left out, and files past the retention ar
   metrics.play({ user: "tv1", streamId: 1, channel: "Later", pid: "nova", reason: "first" });
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), [new Date(now()).toISOString().slice(0, 10) + ".jsonl"]);
 });
+
+test("data() gives the dashboard each provider's history and the plays per hour", (t) => {
+  const { metrics, now } = setup(t);
+  metrics.account({ pid: "polar", status: "Active", used: 5, max: 5, expires: "2027-03-21", channels: 100, leases: 0 });
+  metrics.play({ user: "tv1", streamId: 1, channel: "US - CNN", pid: "nova", reason: "first" });
+  metrics.play({ user: "tv1", streamId: 1, channel: "US - CNN", pid: "polar", reason: "failover", from: "nova" });
+  now.advance(60000);
+  const d = metrics.data(24);
+  assert.deepStrictEqual(d.providers.find((p) => p.id === "polar").series, [[START, 5, 5, 0]]);
+  assert.strictEqual(d.hourly.reduce((s, h) => s + h.plays, 0), 2);
+  assert.strictEqual(d.hourly.reduce((s, h) => s + h.failovers, 0), 1);
+  assert.deepStrictEqual(d.channels.map((c) => [c.channel, c.failedOn]), [["US - CNN", ["nova"]]]);
+});

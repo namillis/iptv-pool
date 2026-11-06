@@ -380,6 +380,8 @@ https://yourname.duckdns.org/pool-<POOL_KEY>/manifest.json
 
 The page shows no logins or URLs.
 
+`https://yourname.duckdns.org/dashboard` shows the same status and metrics as a page: health, what needs attention (failing refreshes, expiring accounts, outside use, providers that keep failing over), each provider's connections over time, plays by hour, the channels that failed over, plays per TV and the overlap table. It needs the site password (`SITE_PASSWORD`, any username) and is off without one.
+
 `https://yourname.duckdns.org/pool-<POOL_KEY>/metrics` (add `?hours=N`, up to 720) shows what the Xtream logins played over the last 24 hours. It lists each provider's picks and failovers (plays a retry moved off it), how often its account was full, and how often it was full with no pool stream on it, which means the login is in use outside the pool. It also shows refresh errors and channel counts, plays per login, the channels that failed over most, and an hourly trend. Every live play and a check of every account every 15 minutes are kept as JSON lines in `xtream-data/metrics/<day>.jsonl` for 30 days, so they survive a redeploy. The metrics only cover the Xtream logins, since Stremio streams don't go through the pool.
 
 The key is the only thing protecting your provider logins, so treat that link like a password. A wrong key gets a 404. The pool has its own addon ID, so it can be installed next to a regular install. It has no Configure page: edit `providers.json` and run `docker compose restart iptv` instead. `providers.json` is listed in `.gitignore` and `.dockerignore`, so it can't end up in the repo or the image.

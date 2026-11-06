@@ -416,48 +416,88 @@ class ProviderPool extends M3UEPGAddon {
         return this.accounts.byId;
     }
 
+    /** The pool's providers, their channels, refresh and account state, and how much their channel lists overlap. */
+    async status(now = Date.now()) {
+        const accounts = await this.accountStatus(now);
+        const overlap = this.overlapCounts();
+        const providers = this.children.map(child => {
+            const row = overlap.get(child.poolId);
+            const merged = row.get(child.poolId) || 0;
+            let shared = 0;
+            for (const t of this.channels) if (t._primary.length > 1 && t._primary.some(m => m._pid === child.poolId)) shared++;
+            const a = accounts.get(child.poolId);
+            const failing = child.retryAt > now;
+            return {
+                id: child.poolId,
+                name: child.poolName,
+                channels: child.channels.length,
+                merged,
+                shared,
+                onlyHere: merged - shared,
+                lastRefresh: child.lastUpdate || null,
+                refreshError: failing ? child.lastError || 'refresh failed' : null,
+                retryAt: failing ? child.retryAt : null,
+                account: !a ? null : a.error ? { error: a.error } : {
+                    status: a.status,
+                    expires: a.expiresAt || null,
+                    used: a.activeConnections ?? null,
+                    max: a.maxConnections || null,
+                    trial: !!a.isTrial
+                }
+            };
+        });
+        const ids = this.children.map(c => c.poolId);
+        return {
+            members: this.memberCount,
+            channels: this.channels.length,
+            placeholders: this.placeholderCount || 0,
+            checkedAt: this.accounts.at,
+            providers,
+            overlap: {
+                ids,
+                rows: ids.map(a => {
+                    const row = overlap.get(a);
+                    const total = row.get(a) || 0;
+                    return ids.map(b => (a === b || !total ? null : Math.round(100 * (row.get(b) || 0) / total)));
+                })
+            }
+        };
+    }
+
     async report(now = Date.now()) {
         const zone = this.timezone || 'America/New_York';
         const when = ms => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: zone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never');
         const num = n => Number(n || 0).toLocaleString('en-US');
         const pad = (v, n, left) => (left ? String(v).padEnd(n) : String(v).padStart(n));
-        const accounts = await this.accountStatus(now);
-        const overlap = this.overlapCounts();
+        const st = await this.status(now);
         const lines = [
-            `Provider pool: ${this.children.length} providers`,
-            `${num(this.memberCount)} channels merged into ${num(this.channels.length)}` +
-                (this.placeholderCount ? ` (${num(this.placeholderCount)} empty "NO MATCH"/"NO EVENT" slots left out)` : ''),
+            `Provider pool: ${st.providers.length} providers`,
+            `${num(st.members)} channels merged into ${num(st.channels)}` +
+                (st.placeholders ? ` (${num(st.placeholders)} empty "NO MATCH"/"NO EVENT" slots left out)` : ''),
             '',
             [pad('ID', 9, 1), pad('Name', 12, 1), pad('Channels', 9), pad('Merged', 8), pad('Shared', 7), pad('Only here', 10), '  Last refresh'].join(' ')
         ];
-        for (const child of this.children) {
-            const row = overlap.get(child.poolId);
-            const mine = row.get(child.poolId) || 0;
-            let shared = 0;
-            for (const t of this.channels) if (t._primary.length > 1 && t._primary.some(m => m._pid === child.poolId)) shared++;
-            const status = child.retryAt > now ? `failed, retry ${when(child.retryAt)}${child.lastError ? `: ${child.lastError}` : ''}` : when(child.lastUpdate);
-            lines.push([pad(child.poolId, 9, 1), pad(child.poolName, 12, 1), pad(num(child.channels.length), 9), pad(num(mine), 8),
-                pad(mine ? `${Math.round(100 * shared / mine)}%` : '-', 7), pad(num(mine - shared), 10), `  ${status}`].join(' '));
+        for (const p of st.providers) {
+            const status = p.refreshError ? `failed, retry ${when(p.retryAt)}: ${p.refreshError}` : when(p.lastRefresh);
+            lines.push([pad(p.id, 9, 1), pad(p.name, 12, 1), pad(num(p.channels), 9), pad(num(p.merged), 8),
+                pad(p.merged ? `${Math.round(100 * p.shared / p.merged)}%` : '-', 7), pad(num(p.onlyHere), 10), `  ${status}`].join(' '));
         }
         lines.push('', 'Overlap: share of the row provider\'s channels that the column provider also has');
-        const ids = this.children.map(c => c.poolId);
-        lines.push(pad('', 9, 1) + ids.map(id => pad(id.slice(0, 7), 8)).join(''));
-        for (const a of ids) {
-            const row = overlap.get(a);
-            const total = row.get(a) || 0;
-            lines.push(pad(a, 9, 1) + ids.map(b => pad(a === b ? '-' : (total ? `${Math.round(100 * (row.get(b) || 0) / total)}%` : '-'), 8)).join(''));
-        }
-        lines.push('', `Accounts (checked ${when(this.accounts.at)}, cached 5 min)`);
-        for (const child of this.children) {
-            const a = accounts.get(child.poolId);
+        lines.push(pad('', 9, 1) + st.overlap.ids.map(id => pad(id.slice(0, 7), 8)).join(''));
+        st.overlap.ids.forEach((a, i) => {
+            lines.push(pad(a, 9, 1) + st.overlap.rows[i].map(v => pad(v === null ? '-' : `${v}%`, 8)).join(''));
+        });
+        lines.push('', `Accounts (checked ${when(st.checkedAt)}, cached 5 min)`);
+        for (const p of st.providers) {
+            const a = p.account;
             let text = 'playlist, no account';
             if (a && a.error) text = `check failed: ${a.error}`;
             else if (a) {
-                const cons = a.maxConnections ? `${a.activeConnections ?? '?'}/${a.maxConnections} connections in use` : 'connections unknown';
-                const full = a.maxConnections && a.activeConnections >= a.maxConnections ? ' (FULL)' : '';
-                text = `${a.status}, expires ${a.expiresAt ? a.expiresAt.slice(0, 10) : 'never'}, ${cons}${full}${a.isTrial ? ', trial' : ''}`;
+                const cons = a.max ? `${a.used ?? '?'}/${a.max} connections in use` : 'connections unknown';
+                const full = a.max && a.used >= a.max ? ' (FULL)' : '';
+                text = `${a.status}, expires ${a.expires ? a.expires.slice(0, 10) : 'never'}, ${cons}${full}${a.trial ? ', trial' : ''}`;
             }
-            lines.push(`${pad(child.poolId, 9, 1)}${text}`);
+            lines.push(`${pad(p.id, 9, 1)}${text}`);
         }
         return lines.join('\n') + '\n';
     }
@@ -479,6 +519,7 @@ async function createPoolAddon(file) {
     const iface = buildInterface(pool, manifest);
     iface.isPool = true;
     iface.poolReport = () => pool.report();
+    iface.poolStatus = () => pool.status();
     iface.pool = pool;
     iface.touch = () => markUsed(pool);
     return iface;
