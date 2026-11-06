@@ -1151,6 +1151,13 @@ const TV_VIEWS_FLOOR = 250;
 const TV_VIEWS_WEIGHT = 5;
 const TV_SCORE_MAX = 30;
 
+const NATIONAL_NEWS_RE = /^(?:CNN|HLN|FOX NEWS(?: CHANNEL)?|FOX BUSINESS(?: NETWORK)?|MSNBC|MS NOW|CNBC|NEWSMAX(?: TV)?|NEWSNATION|C-?SPAN ?\d?|CBS NEWS(?: 24\/7)?|ABC NEWS(?: LIVE)?|NBC NEWS(?: NOW)?|PBS|BLOOMBERG(?: TV| TELEVISION)?|SCRIPPS NEWS|LIVENOW FROM FOX|FOX NEWS LIVE NOW|CBC NEWS NETWORK|CTV NEWS(?: CHANNEL)?|CPAC)$/i;
+
+/** A national news channel, or a network's national feed ("US - NBC"), as opposed to a local station. */
+function isNationalChannel(name) {
+    return isNorthAmerican(name) && (isNationalFeed(name) || NATIONAL_NEWS_RE.test(networkName(name).replace(/\s+(?:EAST|WEST)$/i, '').trim()));
+}
+
 function showKey(s) {
     return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim()
         .replace(/^the /, '');
@@ -1262,9 +1269,12 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
     for (const list of byShow.values()) {
         for (const { p, chans, start, rest } of list) {
             if (rest !== undefined || used.has(p)) continue;
-            const tentpole = tentpoleOf(p.t, p.st);
+            const tentpole = tentpoleOf(start, p.t, p.st);
             if (!tentpole || (p.r && !p.l) || (!p.l && REPLAY_DESC.test(p.d || '')) || p.e - p.s < MIN_SPECIAL_SECONDS) continue;
-            const links = linksFor(chans, groupOf, start);
+            // Election coverage only counts on a national channel; a local station's is its own market's races.
+            const shown = tentpole.election ? chans.filter(c => isNationalChannel(c.name)) : chans;
+            if (!shown.length) continue;
+            const links = linksFor(shown, groupOf, start);
             const existing = eventOnChannels(byKey, links, start);
             if (existing) {
                 if (!existing.special) existing.importance = importanceOf(existing) + tentpole.score;
@@ -1276,7 +1286,7 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
                 title,
                 programme: title,
                 show: showKey(title),
-                network: titleCase(networkName(chans[0].name)),
+                network: titleCase(networkName(shown[0].name)),
                 category: SPECIAL_CATEGORY,
                 importance: tentpole.score,
                 special: true,

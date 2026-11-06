@@ -56,7 +56,7 @@ function candidates(episodes) {
         const show = ep.show || {};
         const start = Date.parse(ep.airstamp);
         if (!show.id || !show.name || !Number.isFinite(start)) continue;
-        const tentpole = tentpoleOf(show.name, ep.name);
+        const tentpole = tentpoleOf(start, show.name, ep.name);
         const daily = ep.season > 1900;
         const popular = (show.weight || 0) >= MIN_WEIGHT && !daily && ep.type === 'regular';
         const weekly = popular && EVENT_TYPES.has(show.type);

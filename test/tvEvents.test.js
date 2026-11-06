@@ -100,19 +100,35 @@ test("TV events rank by Wikipedia views, not by premieres, and a tentpole ranks 
   assert.strictEqual(categoryOf([...idx.values()].find((e) => e.title === "Oscars")), "Special");
 });
 
-test("a tentpole only the guide lists is a Special, and a replay of one is not", () => {
-  const idx = index(
-    [channel("cnn", "US - CNN"), channel("cnn2", "US - CNN INTERNATIONAL")],
+test("election coverage is a Special on national channels on election day, and a replay of it is not", () => {
+  const night = Date.parse("2026-11-04T01:05:00Z");
+  const at = (t, extra = {}) => ({ s: S("2026-11-04T01:00:00Z"), e: S("2026-11-04T05:00:00Z"), t, ...extra });
+  const idx = buildEventIndex(
+    [channel("cnn", "US - CNN"), channel("cnn2", "US - CNN HD"), channel("nbc", "US - NBC"), channel("ktuu", "US - NBC 2 ANCHORAGE (KTUU)")],
     {
-      cnn: [listing("Election Night in America", { l: 1 })],
-      cnn2: [listing("Election Night in America", { r: 1, d: "A replay of last night's coverage." })],
-    },
-    []
+      now: night,
+      groupOf: (c) => c.category,
+      epgIdOf: (c) => c.epg || null,
+      tv: [],
+      epgData: {
+        cnn: [at("Election Night in America", { l: 1 })],
+        cnn2: [at("Election Night in America", { r: 1, d: "A replay of last night's coverage." })],
+        nbc: [at("Decision 2026", { l: 1 })],
+        ktuu: [at("Alaska Live Election Coverage 2026", { l: 1 })],
+      },
+    }
   );
   const events = [...idx.values()];
-  assert.strictEqual(events.length, 1);
-  assert.strictEqual(categoryOf(events[0]), "Special");
-  assert.deepStrictEqual(events[0].channels.map((c) => c.id), ["cnn"]);
+  assert.deepStrictEqual(events.map((e) => e.channels.map((c) => c.id)).sort(), [["cnn"], ["nbc"]]);
+  for (const e of events) assert.strictEqual(categoryOf(e), "Special");
+});
+
+test("election coverage after the day after election day is not a tentpole", () => {
+  const idx = index([channel("cnn", "US - CNN")], { cnn: [listing("Election Night in America", { l: 1 })] }, []);
+  assert.strictEqual(idx.size, 0);
+  assert.strictEqual(tentpoleOf(Date.parse("2026-11-06T01:00:00Z"), "Election Night in America"), null);
+  assert.strictEqual(tentpoleOf(Date.parse("2026-11-04T20:00:00Z"), "Election Night in America").label, "Election night");
+  assert.strictEqual(tentpoleOf(Date.parse("2028-11-08T02:00:00Z"), "Decision 2028").label, "Election night");
 });
 
 test("a tentpole the sports listings already found is moved up instead of listed twice", () => {
@@ -134,8 +150,8 @@ test("a TV event's channel only matches while its guide lists the show", () => {
 });
 
 test("tentpoles leave out the Youth and Special Olympics", () => {
-  assert.strictEqual(tentpoleOf("Swimming - 2026 Youth Olympic Games – Dakar"), null);
-  assert.strictEqual(tentpoleOf("Special Olympics World Games"), null);
-  assert.strictEqual(tentpoleOf("Winter Olympics").label, "Olympics");
-  assert.strictEqual(tentpoleOf("2028 Summer Olympics Opening Ceremony").label, "Olympics ceremony");
+  assert.strictEqual(tentpoleOf(NOW, "Swimming - 2026 Youth Olympic Games – Dakar"), null);
+  assert.strictEqual(tentpoleOf(NOW, "Special Olympics World Games"), null);
+  assert.strictEqual(tentpoleOf(NOW, "Winter Olympics").label, "Olympics");
+  assert.strictEqual(tentpoleOf(NOW, "2028 Summer Olympics Opening Ceremony").label, "Olympics ceremony");
 });
