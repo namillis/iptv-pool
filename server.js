@@ -20,6 +20,7 @@ const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
 const { createPoolAddon } = require("./providerPool");
 const { createXtreamRouter } = require("./xtream/api");
 const { getSchedule } = require("./espnSchedule");
+const { getTvSchedule } = require("./tvSchedule");
 const fs = require("fs");
 const LRUCache = require("./lruCache");
 
@@ -557,8 +558,9 @@ app.listen(port, () => {
       .catch((e) => console.error("[POOL] Build failed:", e.message));
 });
 
-// The startup provider refresh and the ESPN schedule, either of which changes what the Xtream login shows.
+// The startup provider refresh and the ESPN and TVmaze schedules, any of which changes what the Xtream login shows.
 function startupSettled(pool) {
   const schedule = getSchedule();
-  return Promise.allSettled([pool.updateData(), schedule.loading, schedule.historyLoading]);
+  const tv = getTvSchedule();
+  return Promise.allSettled([pool.updateData(), schedule.loading, schedule.historyLoading, tv.loading]);
 }

@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { tentpoleOf } = require('./tentpoles');
 
 const MONTHS = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
 const ZONES = { ET: 'America/New_York', UK: 'Europe/London' };
@@ -837,6 +838,7 @@ function sideNamed(names, words) {
 // Whether a channel's guide programme at game time is this game: 'match', 'likely' for a generic listing like
 // "NFL Football", 'other' when something else is on, or 'unknown' when there's no listing or the event has no teams.
 function programmeVerdict(e, p) {
+    if (p && e.show) return showKey(p.t) === e.show || showKey(String(p.t || '').split(':')[0]) === e.show ? 'match' : 'other';
     if (!p || !e.teams) return 'unknown';
     const words = new Set(teamWords([p.t, p.st, p.d].filter(Boolean).join(' ')));
     const sides = e.gameTeams || e.teams.map(t => [t]);
@@ -1139,7 +1141,155 @@ function adoptAltCastGame(byKey, games) {
     }
 }
 
-function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null } = {}) {
+const TV_CATEGORY = 'TV';
+const SPECIAL_CATEGORY = 'Special';
+const TV_CATEGORIES = [TV_CATEGORY, SPECIAL_CATEGORY];
+const TV_MATCH_MS = 20 * 60000;
+const MIN_SPECIAL_SECONDS = 30 * 60;
+// A show with this many Wikipedia views a day scores 0, and each doubling adds TV_VIEWS_WEIGHT, up to TV_SCORE_MAX.
+const TV_VIEWS_FLOOR = 250;
+const TV_VIEWS_WEIGHT = 5;
+const TV_SCORE_MAX = 30;
+
+function showKey(s) {
+    return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim()
+        .replace(/^the /, '');
+}
+
+// A show ranks by how many people read its Wikipedia article, so The Traitors (about 6,700 a day) scores 24 and a
+// show with no article scores 0. A tentpole like the Oscars ranks with the biggest games instead.
+function tvImportance(s) {
+    if (s.tentpole) return s.tentpole.score;
+    if (!(s.views > TV_VIEWS_FLOOR)) return 0;
+    return Math.min(TV_SCORE_MAX, Math.round(TV_VIEWS_WEIGHT * Math.log2(s.views / TV_VIEWS_FLOOR) * 10) / 10);
+}
+
+function tvTitle(s) {
+    const mark = s.seriesPremiere ? 'Series Premiere' : s.premiere ? 'Season Premiere' : s.finale ? 'Season Finale' : null;
+    return mark ? `${s.show} · ${mark}` : s.show;
+}
+
+/** The North American guide listings around now, by show name, each with the channel it airs on. */
+function guideListingsByShow(epgData, channelsByEpgId, now) {
+    const byShow = new Map();
+    const add = (key, hit) => {
+        if (!key) return;
+        if (!byShow.has(key)) byShow.set(key, []);
+        byShow.get(key).push(hit);
+    };
+    for (const [epgId, list] of Object.entries(epgData || {})) {
+        const chans = (channelsByEpgId.get(epgId) || []).filter(c => isNorthAmerican(c.name));
+        if (!chans.length || !Array.isArray(list)) continue;
+        for (const p of list) {
+            const start = p.s * 1000;
+            if (p.e * 1000 <= now - GUIDE_BEFORE_MS || start >= now + GUIDE_AHEAD_MS) continue;
+            add(showKey(p.t), { p, chans, start });
+            // "Show: Episode" titles are kept under the show too, and only count when the rest is the episode.
+            const colon = String(p.t || '').match(/^(.+?):\s+(.+)$/);
+            if (colon) add(showKey(colon[1]), { p, chans, start, rest: showKey(colon[2]) });
+        }
+    }
+    return byShow;
+}
+
+function linksFor(chans, groupOf, start) {
+    return chans.map(c => ({ id: c.id, slot: (c.name || '').trim(), source: sourceLabel(groupOf(c)), logo: c.logo || c.attributes?.['tvg-logo'] || null, at: start }));
+}
+
+/** An event already listed on one of these channels around this time, like a sports listing for the Olympics. */
+function eventOnChannels(byKey, links, start) {
+    const ids = new Set(links.map(l => l.id));
+    for (const e of byKey.values()) {
+        if (!e.show && Math.abs(e.start - start) <= TV_MATCH_MS && e.channels.some(c => ids.has(c.id))) return e;
+    }
+    return null;
+}
+
+function addTvEntry(byKey, key, fields, links) {
+    let entry = byKey.get(key);
+    if (!entry) {
+        entry = {
+            id: 'iptv_ev_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16),
+            assumedDay: false,
+            sources: [],
+            channels: [],
+            ...fields
+        };
+        byKey.set(key, entry);
+    }
+    for (const l of links) {
+        if (!entry.sources.includes(l.source)) entry.sources.push(l.source);
+        if (!entry.channels.some(c => c.id === l.id)) entry.channels.push(l);
+    }
+    return entry;
+}
+
+/**
+ * TV events: the shows from TVmaze's schedule that the guide finds on a pool channel, and tentpoles (award shows,
+ * election night, the Olympics) that only the guide lists. One already in the index as a sports listing is
+ * moved up by the tentpole's score instead of being listed twice.
+ */
+function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
+    const byShow = guideListingsByShow(epgData, channelsByEpgId, now);
+    const used = new Set();
+    for (const s of shows || []) {
+        if (s.end <= now - GUIDE_BEFORE_MS || s.start >= now + GUIDE_AHEAD_MS) continue;
+        const episode = showKey(s.episode);
+        const hits = (byShow.get(showKey(s.show)) || [])
+            .filter(h => Math.abs(h.start - s.start) <= TV_MATCH_MS && (!h.rest || h.rest === episode));
+        if (!hits.length) continue;
+        hits.forEach(h => used.add(h.p));
+        const links = hits.flatMap(h => linksFor(h.chans, groupOf, h.start));
+        const existing = eventOnChannels(byKey, links, s.start);
+        if (existing) {
+            if (s.tentpole) existing.importance = importanceOf(existing) + s.tentpole.score;
+            continue;
+        }
+        const p = hits[0].p;
+        addTvEntry(byKey, `TV|${s.id}`, {
+            title: tvTitle(s),
+            programme: s.show,
+            show: showKey(s.show),
+            network: s.network || titleCase(networkName(hits[0].chans[0].name)),
+            category: s.tentpole ? SPECIAL_CATEGORY : TV_CATEGORY,
+            importance: tvImportance(s),
+            teams: null,
+            start: s.start,
+            end: Math.max(s.end, p.e * 1000),
+            guide: { t: s.show, ...(s.episode ? { st: s.episode } : {}), ...((s.summary || p.d) ? { d: s.summary || p.d } : {}) }
+        }, links);
+    }
+    for (const list of byShow.values()) {
+        for (const { p, chans, start, rest } of list) {
+            if (rest !== undefined || used.has(p)) continue;
+            const tentpole = tentpoleOf(p.t, p.st);
+            if (!tentpole || (p.r && !p.l) || (!p.l && REPLAY_DESC.test(p.d || '')) || p.e - p.s < MIN_SPECIAL_SECONDS) continue;
+            const links = linksFor(chans, groupOf, start);
+            const existing = eventOnChannels(byKey, links, start);
+            if (existing) {
+                if (!existing.special) existing.importance = importanceOf(existing) + tentpole.score;
+                existing.special = true;
+                continue;
+            }
+            const title = String(p.t).trim();
+            addTvEntry(byKey, `SPECIAL|${eventKey(title, start)}`, {
+                title,
+                programme: title,
+                show: showKey(title),
+                network: titleCase(networkName(chans[0].name)),
+                category: SPECIAL_CATEGORY,
+                importance: tentpole.score,
+                special: true,
+                teams: null,
+                start,
+                end: p.e * 1000,
+                guide: guideListing(p)
+            }, links);
+        }
+    }
+}
+
+function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null, tv = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
     for (const c of channels) {
@@ -1189,6 +1339,7 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
     mergeNamedMatchups(byKey);
     mergeSameChannel(byKey);
     mergeSameBroadcast(byKey);
+    if (epgData) addTvEvents(byKey, tv, epgData, channelsByEpgId, groupOf, now);
     for (const e of byKey.values()) {
         if (e.game) {
             e.gameTeams = e.game.teams;
@@ -1286,7 +1437,7 @@ function liveRank(e) {
 
 function matchesGenre(e, genre, includeAssumed) {
     if (!genre) return !e.assumedDay || includeAssumed;
-    if (SPORT_CATEGORIES.includes(genre)) return categoryOf(e) === genre && (!e.assumedDay || includeAssumed);
+    if (SPORT_CATEGORIES.includes(genre) || TV_CATEGORIES.includes(genre)) return categoryOf(e) === genre && (!e.assumedDay || includeAssumed);
     return e.sources.includes(genre);
 }
 
@@ -1297,11 +1448,17 @@ function dayBounds(now, zone = 'America/New_York') {
     return { start, end };
 }
 
-function currentEvents(index, now = Date.now(), { genre = null, source = null, includeAssumed = false } = {}) {
+function isTvEvent(e) {
+    return TV_CATEGORIES.includes(categoryOf(e));
+}
+
+/** What's live or starting soon, biggest first. [kind] 'tv' keeps only TV events and 'sports' everything else. */
+function currentEvents(index, now = Date.now(), { genre = null, source = null, includeAssumed = false, kind = null } = {}) {
     const filter = genre || source;
     const live = [];
     const soon = [];
     for (const e of index.values()) {
+        if (kind && (kind === 'tv') !== isTvEvent(e)) continue;
         if (!matchesGenre(e, filter, includeAssumed)) continue;
         const s = eventState(e, now);
         if (s === 'live') live.push(e);
@@ -1323,4 +1480,4 @@ function todayEvents(index, now = Date.now(), { genre = null, includeAssumed = f
     return out.sort((a, b) => a.start - b.start || a.title.localeCompare(b.title));
 }
 
-module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES };
+module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES, TV_CATEGORIES, isTvEvent };
