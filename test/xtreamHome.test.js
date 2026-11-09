@@ -42,33 +42,38 @@ function fakePool() {
 test("home categories come first, in order, ranked, with the channels moved into them", () => {
   const view = buildView(fakePool(), new XtreamIds(null), ["UK", "US"], HOME);
   const cats = gunzipJson(view.categoriesGz);
-  assert.deepStrictEqual(cats.map((c) => c.category_name), ["Local", "Sports", "AM | USA | SPORTS", "EU | UK | SPORTS", "EU | UK | GENERAL"],
-    "empty home and provider categories are left out; US provider categories go before UK ones");
+  assert.deepStrictEqual(cats.map((c) => c.category_name), ["Local", "Sports", "UK | Sports", "UK | Entertainment"],
+    "empty home categories are left out; pool categories of the same name join them; UK ones go after");
   const rail = (name) => gunzipJson(view.categoryStreams.get(cats.find((c) => c.category_name === name).category_id)).map((s) => s.name);
   assert.deepStrictEqual(rail("Local"), ["CBS 9 Washington", "NBC 4 Washington"]);
-  assert.deepStrictEqual(rail("Sports"), ["ESPN", "Fox Sports 1"], "home.json order, keys the pool doesn't have are skipped");
-  assert.deepStrictEqual(rail("AM | USA | SPORTS"), ["ESPNU", "NFL Network", "Sky News"], "a moved channel is only in its home category");
+  assert.deepStrictEqual(rail("Sports").slice(0, 2), ["ESPN", "Fox Sports 1"], "home.json order, keys the pool doesn't have are skipped");
+  assert.deepStrictEqual(rail("UK | Sports"), ["Sky Sports Main Event", "Sky News"], "a channel is filed by its own country");
+  assert.deepStrictEqual(gunzipJson(view.categoryStreams.get(cats[1].category_id)).map((s) => s.name), ["ESPN", "Fox Sports 1", "ESPNU", "NFL Network"],
+    "the curated channels first, then the rest of Sports");
 
   const streams = gunzipJson(view.streamsGz);
   assert.deepStrictEqual(streams.map((s) => s.name).slice(0, 4), ["CBS 9 Washington", "NBC 4 Washington", "ESPN", "Fox Sports 1"]);
   assert.deepStrictEqual(streams.map((s) => s.num), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   const espn = streams.find((s) => s.name === "ESPN");
   assert.strictEqual(espn.category_id, cats[1].category_id, "the Guide files a channel under its one category_id");
-  assert.strictEqual(espn.category_ids.length, 3, "plus its provider categories");
+  assert.strictEqual(espn.category_ids.length, 1, "and only that one");
   assert.strictEqual(view.homeCountry, "US");
 });
 
-test("a provider category counts as US when most of its channels are", () => {
+test("the same group under different provider names is one category", () => {
   const pool = fakePool();
-  pool.channels.push(tile("UK|SKYSPORTSF1", "Sky Sports F1", ["AM | USA | SPORTS"]));
-  const cats = gunzipJson(buildView(pool, new XtreamIds(null), ["UK", "US"], HOME).categoriesGz).map((c) => c.category_name);
-  assert.deepStrictEqual(cats.slice(2), ["EU | UK | SPORTS", "EU | UK | GENERAL", "AM | USA | SPORTS"], "two US channels against two UK is not most");
+  pool.channels.push(tile("CALL|KNBC|NBC", "NBC 4 Los Angeles", ["|NA| USA NBC"]), tile("CALL|WMAQ|NBC", "NBC 5 Chicago", ["US| NBC ᴴᴰ/ᴿᴬᵂ ⁶⁰ᶠᵖˢ"]),
+    tile("US|NBATV", "NBA TV", ["AM | USA NBA"]), tile("US|NBAGAME1", "NBA Game 1", ["US| NBA PPV"]));
+  const view = buildView(pool, new XtreamIds(null), ["US"], HOME);
+  const cats = gunzipJson(view.categoriesGz);
+  assert.deepStrictEqual(cats.map((c) => c.category_name), ["Local", "Sports", "Local NBC", "NBA", "PPV & Events"], "browsing categories first, event slots last");
+  assert.deepStrictEqual(gunzipJson(view.categoryStreams.get(cats[2].category_id)).map((s) => s.name), ["NBC 4 Los Angeles", "NBC 5 Chicago"]);
 });
 
-test("logins without the home country get the provider categories as before", () => {
+test("logins without the home country get only the pool categories", () => {
   const view = buildView(fakePool(), new XtreamIds(null), ["UK"], HOME);
   const cats = gunzipJson(view.categoriesGz).map((c) => c.category_name);
-  assert.deepStrictEqual(cats, ["EU | UK | SPORTS", "EU | UK | GENERAL", "AM | USA | SPORTS"]);
+  assert.deepStrictEqual(cats, ["UK | Sports", "UK | Entertainment"]);
   assert.strictEqual(view.homeCountry, null);
   const all = gunzipJson(buildView(fakePool(), new XtreamIds(null), [], HOME).categoriesGz).map((c) => c.category_name);
   assert.strictEqual(all[0], "Local", "a login with no country filter gets the home categories");
