@@ -97,7 +97,8 @@ test("bad home files are refused", () => {
 test("the shipped home.json loads and only uses keys the merge can produce", () => {
   const home = loadHome(shipped);
   assert.strictEqual(home.country, "US");
-  assert.deepStrictEqual(home.categories.map((c) => c.name).slice(0, 5), ["Local", "Sports", "News", "Entertainment", "Movies"]);
+  // "Local DC", not "Local": the pool's own Local category (other cities' stations) would join a list named Local.
+  assert.deepStrictEqual(home.categories.map((c) => c.name).slice(0, 5), ["Local DC", "Sports", "News", "Entertainment", "Movies"]);
   for (const key of home.slots.keys()) {
     assert.match(key, /^(US\|[A-Z0-9]+|CALL\|[KW][A-Z]{2,3}\|[A-Z]+)$/, key);
     assert.strictEqual(KEY_ALIASES[key], undefined, `${key} is folded into another key`);
