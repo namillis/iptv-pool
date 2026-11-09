@@ -4,9 +4,10 @@ const { tentpoleOf } = require('./tentpoles');
 const SCHEDULE_URL = 'https://api.tvmaze.com/schedule?country=US&date=';
 const SEASONS_URL = id => `https://api.tvmaze.com/shows/${id}/seasons`;
 // TVmaze's weight is a 0-100 popularity score; nearly every network show is 95 or more.
-const MIN_WEIGHT = 90;
-// Shows that are an event every week. Scripted shows only count on a premiere or finale.
-const EVENT_TYPES = new Set(['Reality', 'Game Show', 'Variety', 'Award Show']);
+const MIN_WEIGHT = 80;
+// Daily shows number their seasons by year. Only news and talk shows among them count; soaps and daily game shows don't.
+const DAILY_TYPES = new Set(['News', 'Talk Show']);
+const KIDS_NETWORK = /nick|disney|cartoon|boomerang|pbs kids|universal kids|baby|discovery family/i;
 const DEFAULT_RUNTIME_MIN = 60;
 const REFRESH_MS = 30 * 60000;
 const RETRY_MS = 5 * 60000;
@@ -45,10 +46,14 @@ function stripHtml(s) {
         .replace(/\s+/g, ' ').trim();
 }
 
+function isKidsShow(show) {
+    return (show.genres || []).includes('Children') || KIDS_NETWORK.test(show.network?.name || show.webChannel?.name || '');
+}
+
 /**
- * The listings worth showing in Live Now: tentpoles of any type, every episode of a popular weekly reality, game,
- * variety or award show, and the premieres and finales of popular scripted shows. Daily shows (soaps, talk shows,
- * news, game shows like The Price Is Right) number their seasons by year and are left out unless they're a tentpole.
+ * The listings worth showing in Popular on TV: tentpoles of any type, and every regular episode of a popular show
+ * except kids' shows. Daily shows (seasons numbered by year) count only when they're news or talk shows, so soaps
+ * and The Price Is Right stay out. Pageviews decide the order.
  */
 function candidates(episodes) {
     const out = [];
@@ -58,10 +63,9 @@ function candidates(episodes) {
         if (!show.id || !show.name || !Number.isFinite(start)) continue;
         const tentpole = tentpoleOf(start, show.name, ep.name);
         const daily = ep.season > 1900;
-        const popular = (show.weight || 0) >= MIN_WEIGHT && !daily && ep.type === 'regular';
-        const weekly = popular && EVENT_TYPES.has(show.type);
-        const scripted = popular && (show.type === 'Scripted' || show.type === 'Animation');
-        if (!tentpole && !weekly && !scripted) continue;
+        const popular = (show.weight || 0) >= MIN_WEIGHT && ep.type === 'regular' && (!daily || DAILY_TYPES.has(show.type)) && !isKidsShow(show);
+        const scripted = popular && !daily && (show.type === 'Scripted' || show.type === 'Animation');
+        if (!tentpole && !popular) continue;
         const runtime = ep.runtime || show.runtime || DEFAULT_RUNTIME_MIN;
         out.push({
             id: ep.id,
@@ -106,8 +110,7 @@ async function markFinales(shows, now) {
         });
     }
     for (const id of seasonsMemo.keys()) if (now - seasonsMemo.get(id).at >= SEASONS_TTL_MS) seasonsMemo.delete(id);
-    // A scripted show is only an event on a premiere or a finale.
-    return shows.filter(s => !s.needsFinaleCheck || s.finale).map(({ needsFinaleCheck, ...s }) => s);
+    return shows.map(({ needsFinaleCheck, ...s }) => s);
 }
 
 function expire(memo, ttl, now) {
