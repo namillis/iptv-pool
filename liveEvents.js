@@ -316,8 +316,18 @@ function matchupOf(text) {
     return null;
 }
 
+// The replay check compares every listed game with ten days of ESPN results, so the same few thousand team names are
+// split into words millions of times per index build. The split is cached; callers must not change the returned array.
+const TEAM_WORDS_MAX = 50000;
+const teamWordsCache = new Map();
+
 function teamWords(side) {
-    return side.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    let words = teamWordsCache.get(side);
+    if (words) return words;
+    if (teamWordsCache.size >= TEAM_WORDS_MAX) teamWordsCache.clear();
+    words = side.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    teamWordsCache.set(side, words);
+    return words;
 }
 
 function sideMatches(a, b) {
@@ -369,9 +379,26 @@ function dropReplays(byKey, games, history = null) {
     const today = games || [];
     const past = history && history.length ? [...today, ...history] : today;
     if (!past.length) return;
+    // A finished game can only match when one of its team names shares a word with the listing's first team
+    // (nameMatches needs every word of the shorter name in the longer), so each listing is checked against those
+    // games only, not all ten days of results.
+    const finishedByWord = new Map();
+    for (const g of past) {
+        if (g.state !== 'post') continue;
+        for (const names of g.teams) for (const n of names) for (const w of teamWords(n)) {
+            let list = finishedByWord.get(w);
+            if (!list) finishedByWord.set(w, (list = new Set()));
+            list.add(g);
+        }
+    }
     for (const [key, e] of byKey) {
         if (!e.teams || e.listedLive || findGame(e, today)) continue;
-        const played = past.some(g => g.state === 'post' && g.start < e.start && hasTeams(g, e.teams) && !otherCompetition(e, g));
+        const candidates = new Set();
+        for (const w of teamWords(e.teams[0])) for (const g of finishedByWord.get(w) || []) candidates.add(g);
+        let played = false;
+        for (const g of candidates) {
+            if (g.start < e.start && hasTeams(g, e.teams) && !otherCompetition(e, g)) { played = true; break; }
+        }
         if (played && !today.some(g => g.state !== 'post' && hasTeams(g, e.teams))) byKey.delete(key);
     }
 }
@@ -1182,7 +1209,9 @@ function isNationalChannel(name) {
 
 // The pool's guides don't flag live listings, so a cable news channel counts as live from 6 AM to midnight Eastern.
 // Overnight it mostly reruns prime time.
-const easternHour = ms => Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+// One formatter for every listing: toLocaleString builds a new one per call, which cost about a second per build.
+const EASTERN_HOUR = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' });
+const easternHour = ms => Number(EASTERN_HOUR.format(ms));
 const NEWS_LIVE_HOURS = [6, 24];
 
 // Some news feeds title their shows "Live: Hannity", so the prefix is dropped.

@@ -594,6 +594,17 @@ app.use((error, req, res, next) => {
     res.status(500).json({ error: "Internal server error" });
 });
 
+// Every request waits while one step blocks the event loop, so a stall over half a second is logged. The [EVENTS],
+// [XTREAM] and [POOL] timing lines just before it say which step it was.
+const STALL_CHECK_MS = 1000;
+const STALL_LOG_MS = 500;
+let stallTick = Date.now();
+setInterval(() => {
+  const lag = Date.now() - stallTick - STALL_CHECK_MS;
+  if (lag > STALL_LOG_MS) console.warn(`[POOL] Event loop blocked for ${lag} ms`);
+  stallTick = Date.now();
+}, STALL_CHECK_MS).unref();
+
 const port = process.env.PORT || 7000;
 app.listen(port, () => {
   console.log(
