@@ -25,7 +25,7 @@ const TENTPOLES = [
     [/\bmet gala\b/i, 'Met Gala', 35],
     [/\beurovision\b/i, 'Eurovision', 40],
     [/\bmiss (?:universe|america)\b/i, 'Pageant', 30],
-    [/\bcoronation\b|\broyal wedding\b|\bpapal (?:inauguration|conclave)\b|\bconclave\b/i, 'Royal or papal event', 55]
+    [/\bcoronation\b(?! street)|\broyal wedding\b|\bpapal (?:inauguration|conclave)\b|\bconclave\b/i, 'Royal or papal event', 55]
 ];
 
 const etDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });

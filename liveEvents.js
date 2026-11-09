@@ -1150,17 +1150,36 @@ const MIN_SPECIAL_SECONDS = 30 * 60;
 const TV_VIEWS_FLOOR = 250;
 const TV_VIEWS_WEIGHT = 5;
 const TV_SCORE_MAX = 30;
+// A live listing on a national channel with no Wikipedia views, about what 500 views a day would score. Cable news
+// ranks by channel instead (CABLE_NEWS_SCORES), so a show people actually look up ranks above another hour of news.
+const TV_LIVE_GUIDE_SCORE = 5;
 
 const NATIONAL_NEWS_RE = /^(?:CNN|HLN|FOX NEWS(?: CHANNEL)?|FOX BUSINESS(?: NETWORK)?|MSNBC|MS NOW|CNBC|NEWSMAX(?: TV)?|NEWSNATION|C-?SPAN ?\d?|CBS NEWS(?: 24\/7)?|ABC NEWS(?: LIVE)?|NBC NEWS(?: NOW)?|PBS|BLOOMBERG(?: TV| TELEVISION)?|SCRIPPS NEWS|LIVENOW FROM FOX|FOX NEWS LIVE NOW|CBC NEWS NETWORK|CTV NEWS(?: CHANNEL)?|CPAC)$/i;
+
+// The big US cable news channels, ranked by audience. Their daytime and evening shows are live.
+const CABLE_NEWS_SCORES = [[/^FOX NEWS(?: CHANNEL| LIVE NOW)?$/i, 8], [/^(?:MSNBC|MS NOW)$/i, 7], [/^CNN(?: NEWS)?$/i, 7],
+    [/^NEWSNATION$/i, 4], [/^NEWSMAX(?: TV)?$/i, 4]];
+
+function cableNewsScore(name) {
+    if (!isNorthAmerican(name)) return 0;
+    const net = networkName(name).replace(/\s+(?:EAST|WEST|HD|FHD)$/i, '').trim();
+    return CABLE_NEWS_SCORES.find(([re]) => re.test(net))?.[1] || 0;
+}
 
 /** A national news channel, or a network's national feed ("US - NBC"), as opposed to a local station. */
 function isNationalChannel(name) {
     return isNorthAmerican(name) && (isNationalFeed(name) || NATIONAL_NEWS_RE.test(networkName(name).replace(/\s+(?:EAST|WEST)$/i, '').trim()));
 }
 
+// The pool's guides don't flag live listings, so a cable news channel counts as live from 6 AM to midnight Eastern.
+// Overnight it mostly reruns prime time.
+const easternHour = ms => Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+const NEWS_LIVE_HOURS = [6, 24];
+
+// Some news feeds title their shows "Live: Hannity", so the prefix is dropped.
 function showKey(s) {
-    return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim()
-        .replace(/^the /, '');
+    return String(s || '').toLowerCase().replace(/^\s*live:\s*/, '').replace(/&/g, ' and ').replace(/[^\p{L}\p{N} ]+/gu, ' ')
+        .replace(/\s+/g, ' ').trim().replace(/^the /, '');
 }
 
 // A show ranks by how many people read its Wikipedia article, so The Traitors (about 6,700 a day) scores 24 and a
@@ -1259,7 +1278,8 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
             show: showKey(s.show),
             network: s.network || titleCase(networkName(hits[0].chans[0].name)),
             category: s.tentpole ? SPECIAL_CATEGORY : TV_CATEGORY,
-            importance: tvImportance(s),
+            // A news show with few Wikipedia views still ranks as well as its channel's other live news.
+            importance: Math.max(tvImportance(s), ...links.map(l => cableNewsScore(l.slot))),
             teams: null,
             start: s.start,
             end: Math.max(s.end, p.e * 1000),
@@ -1268,28 +1288,39 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
     }
     for (const list of byShow.values()) {
         for (const { p, chans, start, rest } of list) {
-            if (rest !== undefined || used.has(p)) continue;
+            if (rest !== undefined || used.has(p) || p.e - p.s < MIN_SPECIAL_SECONDS) continue;
+            if ((p.r && !p.l) || (!p.l && REPLAY_DESC.test(p.d || ''))) continue;
             const tentpole = tentpoleOf(start, p.t, p.st);
-            if (!tentpole || (p.r && !p.l) || (!p.l && REPLAY_DESC.test(p.d || '')) || p.e - p.s < MIN_SPECIAL_SECONDS) continue;
-            // Election coverage only counts on a national channel; a local station's is its own market's races.
-            const shown = tentpole.election ? chans.filter(c => isNationalChannel(c.name)) : chans;
+            let shown;
+            if (tentpole) {
+                // Election coverage only counts on a national channel; a local station's is its own market's races.
+                shown = tentpole.election ? chans.filter(c => isNationalChannel(c.name)) : chans;
+            } else {
+                // Live cable news, and anything else the guide marks live on a national channel, is listed too. It has
+                // no Wikipedia views, so news ranks by channel. Sports listings are left to Live Sports.
+                if (SPORT_TITLE.test(p.t || '') || SPORT_CATEGORY.test((p.c || []).join(' '))) continue;
+                const hour = easternHour(start);
+                const newsHours = hour >= NEWS_LIVE_HOURS[0] && hour < NEWS_LIVE_HOURS[1];
+                shown = chans.filter(c => p.l ? isNationalChannel(c.name) : newsHours && cableNewsScore(c.name) > 0);
+            }
             if (!shown.length) continue;
             const links = linksFor(shown, groupOf, start);
             const existing = eventOnChannels(byKey, links, start);
             if (existing) {
-                if (!existing.special) existing.importance = importanceOf(existing) + tentpole.score;
-                existing.special = true;
+                if (tentpole && !existing.special) existing.importance = importanceOf(existing) + tentpole.score;
+                if (tentpole) existing.special = true;
                 continue;
             }
-            const title = String(p.t).trim();
-            addTvEntry(byKey, `SPECIAL|${eventKey(title, start)}`, {
+            const title = String(p.t).trim().replace(/^live:\s*/i, '');
+            const score = tentpole ? tentpole.score : Math.max(TV_LIVE_GUIDE_SCORE, ...shown.map(c => cableNewsScore(c.name)));
+            addTvEntry(byKey, `${tentpole ? 'SPECIAL' : 'LIVE'}|${eventKey(title, start)}`, {
                 title,
                 programme: title,
                 show: showKey(title),
                 network: titleCase(networkName(shown[0].name)),
-                category: SPECIAL_CATEGORY,
-                importance: tentpole.score,
-                special: true,
+                category: tentpole ? SPECIAL_CATEGORY : TV_CATEGORY,
+                importance: score,
+                special: !!tentpole,
                 teams: null,
                 start,
                 end: p.e * 1000,

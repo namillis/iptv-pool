@@ -31,17 +31,23 @@ function index(channels, epgData, tv) {
 
 const listing = (t, extra = {}) => ({ s: S("2026-11-06T01:00:00Z"), e: S("2026-11-06T02:00:00Z"), t, ...extra });
 
-test("weekly reality and game shows are kept, daily and plain scripted episodes are not", () => {
+test("popular shows of any type are kept, except daily soaps and game shows, kids' shows and unpopular shows", () => {
   const shows = candidates([
     episode("The Traitors"),
     episode("The Price is Right", { type: "Game Show", season: 2026, number: 163 }),
+    episode("General Hospital", { type: "Scripted", season: 2026, number: 150, network: "ABC" }),
     episode("Jimmy Kimmel Live", { type: "Talk Show", season: 2026, number: 136 }),
+    episode("Anderson Cooper 360", { type: "News", season: 2026, number: 168, network: "CNN" }),
+    episode("Last Week Tonight", { type: "Talk Show", season: 13, number: 29, network: "HBO" }),
     episode("Elsbeth", { type: "Scripted", season: 4, number: 4 }),
+    episode("Late Night Law", { weight: 89, network: "A&E" }),
+    episode("SpongeBob SquarePants", { type: "Animation", season: 17, number: 21, network: "Nickelodeon" }),
     episode("Mistletoe Murders", { type: "Scripted", season: 3, number: 1, network: "Hallmark Channel" }),
     episode("Small Local Show", { weight: 40 }),
     episode("Oscars", { type: "Award Show", season: 2027, number: 1, weight: 97, network: "ABC" }),
   ]);
-  assert.deepStrictEqual(shows.map((s) => s.show).sort(), ["Elsbeth", "Mistletoe Murders", "Oscars", "The Traitors"]);
+  assert.deepStrictEqual(shows.map((s) => s.show).sort(), ["Anderson Cooper 360", "Elsbeth", "Jimmy Kimmel Live", "Last Week Tonight",
+    "Late Night Law", "Mistletoe Murders", "Oscars", "The Traitors"]);
   assert.strictEqual(shows.find((s) => s.show === "Elsbeth").needsFinaleCheck, true);
   assert.strictEqual(shows.find((s) => s.show === "Mistletoe Murders").premiere, true);
   assert.strictEqual(shows.find((s) => s.show === "Oscars").tentpole.label, "Oscars");
@@ -125,10 +131,35 @@ test("election coverage is a Special on national channels on election day, and a
 
 test("election coverage after the day after election day is not a tentpole", () => {
   const idx = index([channel("cnn", "US - CNN")], { cnn: [listing("Election Night in America", { l: 1 })] }, []);
-  assert.strictEqual(idx.size, 0);
+  const [e] = [...idx.values()];
+  assert.strictEqual(categoryOf(e), "TV");
+  assert.strictEqual(importanceOf(e), 7);
   assert.strictEqual(tentpoleOf(Date.parse("2026-11-06T01:00:00Z"), "Election Night in America"), null);
   assert.strictEqual(tentpoleOf(Date.parse("2026-11-04T20:00:00Z"), "Election Night in America").label, "Election night");
   assert.strictEqual(tentpoleOf(Date.parse("2028-11-08T02:00:00Z"), "Decision 2028").label, "Election night");
+});
+
+test("cable news is a TV event from 6 AM to midnight ranked by channel, and local, sports, short, replayed or overnight listings aren't", () => {
+  const channels = [channel("cnn", "US - CNN"), channel("fnc", "US - FOX NEWS CHANNEL"), channel("ktuu", "US - NBC 2 ANCHORAGE (KTUU)"),
+    channel("msn", "US - MS NOW"), channel("cbsn", "US - CBS NEWS"), channel("nbc", "US - NBC"), channel("tlc", "US - TLC"),
+    channel("cnn2", "CA - CNN")];
+  const idx = index(channels, {
+    cnn: [listing("CNN Newsroom")],
+    fnc: [listing("Hannity", { r: 1 })],
+    ktuu: [listing("Channel 2 News at 5")],
+    msn: [{ ...listing("Breaking News Update"), e: S("2026-11-06T01:10:00Z") }],
+    cbsn: [listing("College Football: Ohio State at Michigan")],
+    nbc: [listing("Special Report", { l: 1 })],
+    tlc: [listing("Sister Wives Marathon")],
+    cnn2: [listing("Live: CNN Newsroom")],
+  }, []);
+  const tv = [...idx.values()].filter((e) => categoryOf(e) === "TV");
+  assert.deepStrictEqual(tv.map((e) => e.title).sort(), ["CNN Newsroom", "Special Report"]);
+  assert.deepStrictEqual(tv.map((e) => [e.title, importanceOf(e)]).sort(), [["CNN Newsroom", 7], ["Special Report", 5]]);
+  const late = Date.parse("2026-11-06T08:05:00Z");
+  const overnight = buildEventIndex(channels, { now: late, groupOf: (c) => c.category, epgIdOf: (c) => c.epg || null, tv: [],
+    epgData: { cnn: [{ s: S("2026-11-06T08:00:00Z"), e: S("2026-11-06T09:00:00Z"), t: "Anderson Cooper 360" }] } });
+  assert.strictEqual(overnight.size, 0);
 });
 
 test("a tentpole the sports listings already found is moved up instead of listed twice", () => {
