@@ -156,6 +156,7 @@ test("cable news is a TV event from 6 AM to midnight ranked by channel, and loca
   const tv = [...idx.values()].filter((e) => categoryOf(e) === "TV");
   assert.deepStrictEqual(tv.map((e) => e.title).sort(), ["CNN Newsroom", "Special Report"]);
   assert.deepStrictEqual(tv.map((e) => [e.title, importanceOf(e)]).sort(), [["CNN Newsroom", 7], ["Special Report", 5]]);
+  assert.strictEqual(tv.find((e) => e.title === "CNN Newsroom").network, "CNN");
   const late = Date.parse("2026-11-06T08:05:00Z");
   const overnight = buildEventIndex(channels, { now: late, groupOf: (c) => c.category, epgIdOf: (c) => c.epg || null, tv: [],
     epgData: { cnn: [{ s: S("2026-11-06T08:00:00Z"), e: S("2026-11-06T09:00:00Z"), t: "Anderson Cooper 360" }] } });

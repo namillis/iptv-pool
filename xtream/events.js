@@ -137,9 +137,9 @@ function buildEvents(pool, { countries = [], categoryId, categoryName, kind = nu
     if (!members.length) continue;
     const guided = tiles.find((t) => t._epg && pool.epgData[t._epg]?.length);
     const live = eventState(e, now) === "live";
-    // A TV show is named by the channel that plays it first ("Fox News"); the show is the guide line under it.
-    // A game keeps its matchup as the name, with the league under it.
-    const base = isTvEvent(e) ? tiles[0].name || e.network || e.title : e.title;
+    // A TV show is named by its network ("Fox News", "NBC"); the show is the guide line under it. A game keeps its
+    // matchup as the name, with the league under it.
+    const base = isTvEvent(e) ? e.network || tiles[0].name || e.title : e.title;
     const name = live ? base : `${base} · ${pool.formatEventTime(e.start, now)}`;
     const id = eventNumber(e.id, taken);
     taken.add(id);
