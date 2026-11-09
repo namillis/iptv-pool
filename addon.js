@@ -181,6 +181,7 @@ const EPG_REFRESH_MS = parseInt(process.env.EPG_REFRESH_MS || (3600 * 1000).toSt
 const EPG_CACHE_PREFIX = 'addon:epg:v2:';
 const CATCHUP_TTL_MS = 5 * 60 * 1000;
 const EVENT_INDEX_TTL_MS = 10 * 60 * 1000;
+const SLOW_INDEX_MS = 500;
 const LIVE_NOW_CACHE_S = 60;
 const EVENT_STREAMS_MAX = 15;
 const ALT_FEEDS_KEPT = 3;
@@ -425,6 +426,7 @@ class M3UEPGAddon {
         const tv = getTvSchedule(now);
         if (!this.eventIndex || this.eventIndexFor !== this.channels || this.eventIndexEpg !== this.epgData ||
             this.eventIndexSchedule !== schedule.version || this.eventIndexTv !== tv.version || now - this.eventIndexAt > EVENT_INDEX_TTL_MS) {
+            const buildStart = Date.now();
             this.eventIndex = buildEventIndex(this.channels, {
                 now,
                 groupOf: c => this.channelGroup(c),
@@ -435,6 +437,9 @@ class M3UEPGAddon {
                 races: schedule.races,
                 tv: tv.shows
             });
+            // The build runs on the request path and blocks every other request while it runs.
+            const buildMs = Date.now() - buildStart;
+            if (buildMs > SLOW_INDEX_MS) console.warn(`[EVENTS] Event index rebuilt in ${buildMs} ms (${this.eventIndex.size} events)`);
             this.eventIndexFor = this.channels;
             this.eventIndexEpg = this.epgData;
             this.eventIndexSchedule = schedule.version;
