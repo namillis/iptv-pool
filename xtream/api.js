@@ -40,6 +40,9 @@ const POPULAR_TV_KEY = "\u0000POPULAR TV";
 const HOME_KEY = "\u0000HOME|";
 // The pool's own categories (xtream/categories.js), kept apart from the ids of the provider groups they replace.
 const POOL_CATEGORY_KEY = "\u0000POOL|";
+// See viewFor: the wait before a deferred view rebuild, and the least time between two.
+const VIEW_REBUILD_DELAY_MS = 250;
+const VIEW_REBUILD_GAP_MS = 15000;
 const POOL_API_VERSION = 1;
 const POOL_FEATURES = ["retry", "stop", "sources", "event_info", "guide_window"];
 // The pool keeps 6 hours of past guide and 36 ahead (addon.js), so a window can't reach further than that.
@@ -353,7 +356,8 @@ function sendGzip(req, res, body, type) {
   return res.end(zlib.gunzipSync(body));
 }
 
-function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now }) {
+function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now,
+  viewRebuildDelayMs = VIEW_REBUILD_DELAY_MS, viewRebuildGapMs = VIEW_REBUILD_GAP_MS }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const archives = new ArchiveMemory(archiveFile, { now, log });
@@ -403,13 +407,16 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     const view = views.get(profile);
     const archiveStale = view && view.archiveRev !== archives.revision() && now() - view.archiveAt >= ARCHIVE_REBUILD_MS;
     if (!view || archiveStale || (view.channels !== pool.channels && !deferNewChannels)) return rebuildView(pool, user, profile);
-    if (view.channels !== pool.channels) {
-      if (!pendingViews.has(profile)) {
-        pendingViews.set(profile, setImmediate(() => {
-          pendingViews.delete(profile);
-          rebuildView(pool, user, profile);
-        }));
-      }
+    if (view.channels !== pool.channels && !pendingViews.has(profile)) {
+      // Same timing as the event index (addon.js liveEventIndex): wait so queued requests go first, and leave a gap
+      // after the last build so a burst of provider refreshes rebuilds once.
+      const wait = Math.max(viewRebuildDelayMs, view.builtAt + viewRebuildGapMs - Date.now());
+      const timer = setTimeout(() => {
+        pendingViews.delete(profile);
+        rebuildView(pool, user, profile);
+      }, wait);
+      if (timer.unref) timer.unref();
+      pendingViews.set(profile, timer);
     }
     return view;
   }
