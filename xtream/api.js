@@ -20,7 +20,8 @@ const EMPTY_LIST_ACTIONS = new Set([
   "get_series",
 ]);
 const EMPTY_OBJECT_ACTIONS = new Set(["get_vod_info", "get_series_info"]);
-const API_PER_MIN = 60;
+// An app launch plus fast scrolling through catch-up rows in a guide (one get_simple_data_table per row) can pass 100.
+const API_PER_MIN = 300;
 const STREAMS_PER_MIN = 30;
 const STATUS_WAIT_MS = 4000;
 const STATUS_REFRESH_MS = 30 * 1000;
@@ -357,6 +358,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   const ids = new XtreamIds(idsFile, { log });
   const archives = new ArchiveMemory(archiveFile, { now, log });
   const views = new Map();
+  const pendingViews = new Map();
   const playback = new Playback({ now });
   const rates = new Map();
   const tables = new LRUCache({ max: 300, ttl: TABLE_TTL_MS });
@@ -390,21 +392,40 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     return iface.pool;
   }
 
-  function viewFor(pool, user) {
+  /**
+   * The login's view. A changed archive state (at most once a minute) rebuilds it right away, so a channel whose
+   * catch-up stopped working stops advertising it on the next answer. [deferNewChannels] is for requests: after a
+   * provider refresh they get the current view and the rebuild runs in its own turn of the event loop, so its
+   * second of work doesn't stack on top of the refresh or the event index.
+   */
+  function viewFor(pool, user, { deferNewChannels = true } = {}) {
     const profile = user.countries.join(",");
-    let view = views.get(profile);
-    const rev = archives.revision();
-    const archiveStale = view && view.archiveRev !== rev && now() - view.archiveAt >= ARCHIVE_REBUILD_MS;
-    if (!view || view.channels !== pool.channels || archiveStale) {
-      const start = Date.now();
-      const prev = view;
-      view = buildView(pool, ids, user.countries, HOME, archives.hidden());
-      view.archiveRev = rev;
-      view.archiveAt = now();
-      if (prev) view.guide = prev.guide;
-      views.set(profile, view);
-      log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms`);
+    const view = views.get(profile);
+    const archiveStale = view && view.archiveRev !== archives.revision() && now() - view.archiveAt >= ARCHIVE_REBUILD_MS;
+    if (!view || archiveStale || (view.channels !== pool.channels && !deferNewChannels)) return rebuildView(pool, user, profile);
+    if (view.channels !== pool.channels) {
+      if (!pendingViews.has(profile)) {
+        pendingViews.set(profile, setImmediate(() => {
+          pendingViews.delete(profile);
+          rebuildView(pool, user, profile);
+        }));
+      }
     }
+    return view;
+  }
+
+  function rebuildView(pool, user, profile) {
+    const start = Date.now();
+    const prev = views.get(profile);
+    const view = buildView(pool, ids, user.countries, HOME, archives.hidden());
+    view.archiveRev = archives.revision();
+    view.archiveAt = now();
+    if (prev) {
+      view.guide = prev.guide;
+      view.windowGuides = prev.windowGuides;
+    }
+    views.set(profile, view);
+    log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms`);
     return view;
   }
 
@@ -638,8 +659,9 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     if (auth.locked) return lockedOut(res);
     if (!auth.user) return res.json({ user_info: { auth: 0 } });
     const { user, password } = auth;
-    if (overLimit(user, "api", API_PER_MIN)) return tooMany(res);
     const action = String(req.query.action || req.body?.action || "");
+    // pool_info is a constant answer the app checks once per run, so a busy minute never turns its features off.
+    if (action !== "pool_info" && overLimit(user, "api", API_PER_MIN)) return tooMany(res);
 
     if (!action) {
       const now = Date.now();
@@ -837,7 +859,8 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     const build = async () => {
       if (typeof pool.liveEventIndex === "function") pool.liveEventIndex();
       for (const [profile, user] of byProfile) {
-        const view = viewFor(pool, user);
+        // Prebuilding is off the request path, so it builds the new view now instead of deferring it.
+        const view = viewFor(pool, user, { deferNewChannels: false });
         liveFor(pool, view, user);
         await guideFor(pool, view, profile);
       }

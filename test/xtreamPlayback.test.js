@@ -323,6 +323,15 @@ test("stream requests are rate limited per login", async (t) => {
   assert.strictEqual(last.status, 429);
 });
 
+test("API calls are limited to 300 a minute per login, and pool_info never counts or is refused", async (t) => {
+  const { get } = await start(t);
+  const api = (action) => get(`/player_api.php?username=tv1&password=fakepassword123&action=${action}`);
+  // start() already made one call (get_live_streams).
+  for (let i = 0; i < 299; i++) assert.strictEqual((await api("get_live_categories")).status, 200);
+  assert.strictEqual((await api("get_live_categories")).status, 429);
+  assert.strictEqual((await api("pool_info")).status, 200);
+});
+
 test("with attempt numbers, only a higher attempt fails over", () => {
   const now = clock();
   const pb = new Playback({ now });
