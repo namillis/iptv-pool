@@ -7,7 +7,7 @@ const path = require("path");
 const zlib = require("zlib");
 const express = require("express");
 const { XtreamIds } = require("../xtream/ids");
-const { createXtreamRouter, buildView, tileCountry, xmltvTime, xmlEscape } = require("../xtream/api");
+const { createXtreamRouter, buildView, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape } = require("../xtream/api");
 
 function tile(key, name, members, extra = {}) {
   return {
@@ -128,6 +128,30 @@ test("a view filters by country, orders categories and indexes streams by catego
   assert.strictEqual(all.count, 5);
 });
 
+test("a guide window starts on the hour, is clamped to what the pool keeps, and keeps only overlapping programmes", async () => {
+  const now = Date.UTC(2026, 10, 9, 14, 40);
+  const hour = Date.UTC(2026, 10, 9, 14) / 1000;
+  assert.strictEqual(guideWindow({}, now), null, "no parameters is the full guide");
+  assert.deepStrictEqual(guideWindow({ past_hours: "2", future_hours: "12" }, now), { pastHours: 2, futureHours: 12, from: hour - 2 * 3600, to: hour + 13 * 3600 });
+  assert.deepStrictEqual(guideWindow({ past_hours: "99", future_hours: "-3" }, now), { pastHours: 6, futureHours: 1, from: hour - 6 * 3600, to: hour + 2 * 3600 });
+  assert.strictEqual(guideWindow({ future_hours: "8" }, now).pastHours, 6, "a missing bound takes the pool's own");
+
+  const window = guideWindow({ past_hours: "1", future_hours: "2" }, now);
+  const at = (h) => hour + h * 3600;
+  const tile = { name: "CNN", logo: null };
+  const view = { entries: [{ tile, epgKey: "teck/cnn" }] };
+  const epgData = { "teck/cnn": [
+    { s: at(-3), e: at(-2), t: "Too early" },
+    { s: at(-2), e: at(-0.5), t: "Ends inside" },
+    { s: at(1), e: at(4), t: "Starts inside" },
+    { s: at(3), e: at(4), t: "Too late" },
+  ] };
+  const g = await buildGuide(view, epgData, window);
+  const xml = zlib.gunzipSync(g.body).toString();
+  assert.deepStrictEqual([...xml.matchAll(/<title>([^<]+)</g)].map((m) => m[1]), ["Ends inside", "Starts inside"]);
+  assert.strictEqual((await buildGuide(view, epgData)).programmes, 4, "no window keeps everything");
+});
+
 test("xmltv helpers", () => {
   assert.strictEqual(xmltvTime(0), "19700101000000 +0000");
   assert.strictEqual(xmlEscape(`a&b<c>"d'\u0001`), "a&amp;b&lt;c&gt;&quot;d&apos;");
@@ -202,6 +226,12 @@ test("player_api and xmltv over HTTP", async (t) => {
     }).on("error", reject);
   });
   assert.strictEqual(status, 304);
+  // The fake CNN programme is long past, so a window around now keeps the channel but not the programme.
+  const windowed = await fetch(`${base}/xmltv.php?${q}&past_hours=2&future_hours=12`);
+  const windowedXml = await windowed.text();
+  assert.match(windowedXml, /<channel id="teck\.cnn\.us">/);
+  assert.doesNotMatch(windowedXml, /<programme /);
+  assert.notStrictEqual(windowed.headers.get("etag"), guideRes.headers.get("etag"), "each window has its own ETag");
   assert.strictEqual((await fetch(`${base}/xmltv.php?username=living-room&password=x`)).status, 401);
   assert.ok(touched() > 0);
 });

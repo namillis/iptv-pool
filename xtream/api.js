@@ -40,7 +40,12 @@ const HOME_KEY = "\u0000HOME|";
 // The pool's own categories (xtream/categories.js), kept apart from the ids of the provider groups they replace.
 const POOL_CATEGORY_KEY = "\u0000POOL|";
 const POOL_API_VERSION = 1;
-const POOL_FEATURES = ["retry", "stop", "sources", "event_info"];
+const POOL_FEATURES = ["retry", "stop", "sources", "event_info", "guide_window"];
+// The pool keeps 6 hours of past guide and 36 ahead (addon.js), so a window can't reach further than that.
+const GUIDE_PAST_HOURS_MAX = 6;
+const GUIDE_FUTURE_HOURS_MAX = 36;
+// Windowed guides kept per view. Windows start on the hour, so one app asking the same window all hour needs one.
+const WINDOW_GUIDES_MAX = 4;
 const ATTEMPT_RE = /^\d{1,3}$/;
 const SOURCE_RE = /^[a-z0-9]{1,8}\.[A-Za-z0-9_-]{1,40}$/;
 
@@ -268,7 +273,27 @@ function buildLive(pool, ids, view, countries, now = Date.now()) {
   };
 }
 
-async function buildGuide(view, epgData) {
+/**
+ * The guide window a pool-aware app asked for with `past_hours` / `future_hours` on xmltv.php, or null for the
+ * full guide. Bounds start at the current hour, so every request in the same hour shares one built guide (and
+ * ETag). Bad or out-of-range values are clamped rather than refused, since a guide is always better than none.
+ */
+function guideWindow(query, nowMs = Date.now()) {
+  const read = (v, max) => {
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) ? Math.min(max, Math.max(0, n)) : null;
+  };
+  const past = read(query.past_hours, GUIDE_PAST_HOURS_MAX);
+  const future = read(query.future_hours, GUIDE_FUTURE_HOURS_MAX);
+  if (past === null && future === null) return null;
+  const pastHours = past ?? GUIDE_PAST_HOURS_MAX;
+  const futureHours = Math.max(1, future ?? GUIDE_FUTURE_HOURS_MAX);
+  const hour = Math.floor(nowMs / 3600000) * 3600;
+  return { pastHours, futureHours, from: hour - pastHours * 3600, to: hour + (futureHours + 1) * 3600 };
+}
+
+/** The XMLTV guide for [view]: every channel with programmes, and the programmes overlapping [window] when given. */
+async function buildGuide(view, epgData, window = null) {
   const gzip = zlib.createGzip();
   const chunks = [];
   gzip.on("data", (c) => chunks.push(c));
@@ -297,6 +322,7 @@ async function buildGuide(view, epgData) {
     const id = xmlEscape(epgChannelId(epgKey));
     const parts = [];
     for (const p of epgData[epgKey] || []) {
+      if (window && (p.e <= window.from || p.s >= window.to)) continue;
       let xml = `<programme start="${xmltvTime(p.s)}" stop="${xmltvTime(p.e)}" channel="${id}"><title>${xmlEscape(p.t)}</title>`;
       if (p.st) xml += `<sub-title>${xmlEscape(p.st)}</sub-title>`;
       if (p.d) xml += `<desc>${xmlEscape(p.d)}</desc>`;
@@ -391,22 +417,38 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     return view.live;
   }
 
-  async function guideFor(pool, view, profile) {
-    const stale = !view.guide || (view.guide.epgData !== pool.epgData && Date.now() - view.guide.builtAt > GUIDE_MIN_AGE_MS);
-    if (stale && !view.guideBuild) {
+  /** Where a guide for [window] is kept: the view itself for the full guide, else a small per-window cache. */
+  function guideSlot(view, window) {
+    if (!window) return view;
+    view.windowGuides ||= new Map();
+    const key = `${window.from}-${window.to}`;
+    let slot = view.windowGuides.get(key);
+    if (!slot) {
+      slot = { guide: null, guideBuild: null };
+      view.windowGuides.set(key, slot);
+      while (view.windowGuides.size > WINDOW_GUIDES_MAX) view.windowGuides.delete(view.windowGuides.keys().next().value);
+    }
+    return slot;
+  }
+
+  async function guideFor(pool, view, profile, window = null) {
+    const slot = guideSlot(view, window);
+    const stale = !slot.guide || (slot.guide.epgData !== pool.epgData && Date.now() - slot.guide.builtAt > GUIDE_MIN_AGE_MS);
+    if (stale && !slot.guideBuild) {
       const start = Date.now();
-      view.guideBuild = buildGuide(view, pool.epgData)
+      const label = window ? `${profile || "all"} ${window.pastHours}h back, ${window.futureHours}h ahead` : profile || "all";
+      slot.guideBuild = buildGuide(view, pool.epgData, window)
         .then((g) => {
-          view.guide = g;
-          log.log(`[XTREAM] Guide "${profile || "all"}": ${g.channels} channels, ${g.programmes} programmes, ${g.rawBytes} bytes raw, ${g.body.length} gzipped, ${Date.now() - start} ms`);
+          slot.guide = g;
+          log.log(`[XTREAM] Guide "${label}": ${g.channels} channels, ${g.programmes} programmes, ${g.rawBytes} bytes raw, ${g.body.length} gzipped, ${Date.now() - start} ms`);
           return g;
         })
         .finally(() => {
-          view.guideBuild = null;
+          slot.guideBuild = null;
         });
     }
-    if (view.guide) return view.guide;
-    return view.guideBuild;
+    if (slot.guide) return slot.guide;
+    return slot.guideBuild;
   }
 
   function overLimit(user, kind, limit) {
@@ -687,7 +729,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     try {
       const pool = await poolFor();
       const view = viewFor(pool, auth.user);
-      guide = await guideFor(pool, view, auth.user.countries.join(","));
+      guide = await guideFor(pool, view, auth.user.countries.join(","), guideWindow(req.query));
     } catch (e) {
       log.error(`[XTREAM] Guide failed: ${e.message}`);
       return res.status(503).json({ error: "Guide unavailable" });
@@ -807,4 +849,4 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   return router;
 }
 
-module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildGuide, tileCountry, xmltvTime, xmlEscape };
+module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape };
