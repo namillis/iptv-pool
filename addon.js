@@ -182,6 +182,9 @@ const EPG_CACHE_PREFIX = 'addon:epg:v2:';
 const CATCHUP_TTL_MS = 5 * 60 * 1000;
 const EVENT_INDEX_TTL_MS = 10 * 60 * 1000;
 const SLOW_INDEX_MS = 500;
+// See liveEventIndex: the wait before a deferred rebuild, and the least time between two rebuilds.
+const REBUILD_DELAY_MS = 250;
+const REBUILD_GAP_MS = 15000;
 const LIVE_NOW_CACHE_S = 60;
 const EVENT_STREAMS_MAX = 15;
 const ALT_FEEDS_KEPT = 3;
@@ -427,13 +430,16 @@ class M3UEPGAddon {
         const stale = !this.eventIndex || this.eventIndexFor !== this.channels || this.eventIndexEpg !== this.epgData ||
             this.eventIndexSchedule !== schedule.version || this.eventIndexTv !== tv.version || now - this.eventIndexAt > EVENT_INDEX_TTL_MS;
         // A rebuild blocks the server for about a second, so once there's an index the request that notices it's stale
-        // gets the old one and the rebuild runs in its own turn of the event loop, not on top of that request's work.
+        // gets the old one. The rebuild waits REBUILD_DELAY_MS, so requests queued behind a provider's channel merge are
+        // answered first, and at least REBUILD_GAP_MS after the last one, so a burst of provider refreshes rebuilds once.
         if (stale && this.eventIndex) {
             if (!this.eventIndexPending) {
-                this.eventIndexPending = setImmediate(() => {
+                const wait = Math.max(REBUILD_DELAY_MS, this.eventIndexAt + REBUILD_GAP_MS - now);
+                this.eventIndexPending = setTimeout(() => {
                     this.eventIndexPending = null;
                     this.rebuildEventIndex();
-                });
+                }, wait);
+                if (this.eventIndexPending.unref) this.eventIndexPending.unref();
             }
         } else if (stale) {
             this.rebuildEventIndex();

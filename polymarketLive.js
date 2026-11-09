@@ -1,7 +1,9 @@
 const fetch = require('node-fetch');
 
 const EVENTS_URL = 'https://gamma-api.polymarket.com/events';
-const TRADES_URL = 'https://data-api.polymarket.com/trades';
+// Data API v2: v1 was retired on 2026-11-02 and answers 410. v2 wraps rows in `data`; size, price and timestamp
+// keep their names.
+const TRADES_URL = 'https://data-api.polymarket.com/v2/trades';
 // Polymarket's tag for single games, as opposed to season-long markets.
 const GAMES_TAG = 100639;
 const PAGE_SIZE = 100;
@@ -73,9 +75,11 @@ async function refresh() {
     const out = [];
     for (let i = 0; i < games.length; i += CONCURRENCY) {
         const batch = await Promise.allSettled(games.slice(i, i + CONCURRENCY).map(async g => {
-            const { body, age } = await fetchJson(`${TRADES_URL}?eventId=${g.id}&limit=${TRADES_LIMIT}`);
-            if (!Array.isArray(body)) throw new Error('unexpected response');
-            const rate = tradeRate(body, Date.now() / 1000 - age);
+            const { body, age } = await fetchJson(`${TRADES_URL}?event_id=${g.id}&limit=${TRADES_LIMIT}`);
+            // A documented miss is `data: null`, which is no trades rather than a failure.
+            const trades = body && 'data' in body ? body.data || [] : null;
+            if (!Array.isArray(trades)) throw new Error('unexpected response');
+            const rate = tradeRate(trades, Date.now() / 1000 - age);
             return { title: g.title, teams: g.teams, start: g.start, rate: Math.round(rate), boost: boostFor(rate) };
         }));
         for (const r of batch) if (r.status === 'fulfilled') out.push(r.value);
