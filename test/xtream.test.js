@@ -111,17 +111,17 @@ test("a view filters by country, orders categories and indexes streams by catego
   const pool = fakePool();
   const view = buildView(pool, new XtreamIds(null), ["UK", "US"], null);
   const cats = gunzipJson(view.categoriesGz);
-  assert.deepStrictEqual(cats.map((c) => c.category_name), ["US| NEWS", "UK| ENTERTAINMENT", "US| LOCALS"]);
+  assert.deepStrictEqual(cats.map((c) => c.category_name), ["Local ABC", "News", "UK | Entertainment"]);
   const streams = gunzipJson(view.streamsGz);
-  assert.deepStrictEqual(streams.map((s) => s.name), ["CNN", "MSNBC", "BBC One", "ABC 7 (WABC)"], "grouped by category, in category order");
+  assert.deepStrictEqual(streams.map((s) => s.name), ["ABC 7 (WABC)", "CNN", "MSNBC", "BBC One"], "grouped by category, in category order");
   assert.deepStrictEqual(streams.map((s) => s.num), [1, 2, 3, 4]);
   const byName = new Map(streams.map((s) => [s.name, s]));
   assert.strictEqual(byName.get("CNN").epg_channel_id, "teck.cnn.us");
   assert.strictEqual(byName.get("ABC 7 (WABC)").epg_channel_id, "", "a guide id with no programmes is left out");
   assert.strictEqual(byName.get("BBC One").tv_archive, 1);
   assert.strictEqual(byName.get("BBC One").tv_archive_duration, 7);
-  assert.strictEqual(byName.get("BBC One").category_ids.length, 2);
-  const news = gunzipJson(view.categoryStreams.get(cats[0].category_id));
+  assert.deepStrictEqual(byName.get("BBC One").category_ids, [Number(cats[2].category_id)], "one pool category per channel");
+  const news = gunzipJson(view.categoryStreams.get(cats[1].category_id));
   assert.deepStrictEqual(news.map((s) => s.name), ["CNN", "MSNBC"]);
 
   const all = buildView(pool, new XtreamIds(null), [], null);
@@ -180,7 +180,7 @@ test("player_api and xmltv over HTTP", async (t) => {
   const streams = await res.json();
   assert.strictEqual(streams.length, 4);
 
-  const uk = post.find((c) => c.category_name === "UK| ENTERTAINMENT");
+  const uk = post.find((c) => c.category_name === "UK | Entertainment");
   const one = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${uk.category_id}`)).json();
   assert.deepStrictEqual(one.map((s) => s.name), ["BBC One"]);
   const none = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=999`)).json();

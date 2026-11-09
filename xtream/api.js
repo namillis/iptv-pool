@@ -5,6 +5,7 @@ const express = require("express");
 const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../siteAuth");
 const { XtreamIds } = require("./ids");
 const { buildEvents, LIVE_SPORTS, POPULAR_TV } = require("./events");
+const { categoryFor, categoryRank } = require("./categories");
 const { Playback, memberUrl, convertStart, memberKey } = require("./playback");
 const { ArchiveMemory } = require("./archive");
 const LRUCache = require("../lruCache");
@@ -36,6 +37,8 @@ const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
 const POPULAR_TV_KEY = "\u0000POPULAR TV";
 const HOME_KEY = "\u0000HOME|";
+// The pool's own categories (xtream/categories.js), kept apart from the ids of the provider groups they replace.
+const POOL_CATEGORY_KEY = "\u0000POOL|";
 const POOL_API_VERSION = 1;
 const POOL_FEATURES = ["retry", "stop", "sources", "event_info"];
 const ATTEMPT_RE = /^\d{1,3}$/;
@@ -139,18 +142,25 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
   const homeLists = curated
     ? curated.categories.map((c) => ({ id: ids.categoryId(HOME_KEY + c.name), name: c.name, list: new Array(c.size) }))
     : [];
-  const provider = [];
+  // The rest of each home list: its curated channels come first, then every other home-country channel filed
+  // under the same name ("News").
+  const homeByName = new Map(homeLists.map((c) => [c.name, c]));
+  for (const c of homeLists) c.rest = [];
+  const homeCountry = (home || HOME).country;
+  const pooled = [];
   const byCategory = new Map();
   const entries = [];
   const byStreamId = new Map();
   for (const tile of pool.channels) {
     const country = tileCountry(tile._key);
     if (wanted && !wanted.has(country)) continue;
-    const groups = tile._groups.length ? tile._groups : ["Other"];
-    let catIds = groups.map((g) => ids.categoryId(g));
+    const atHome = country === homeCountry;
+    const theme = categoryFor(tile._groups, tile.name, atHome);
+    const name = atHome ? theme : `${country} | ${theme}`;
     const slot = curated && curated.slots.get(tile._key);
-    const categoryId = slot ? homeLists[slot.category].id : catIds[0];
-    if (slot) catIds = [categoryId, ...catIds];
+    const merged = !slot && atHome && homeByName.get(name);
+    const categoryId = slot ? homeLists[slot.category].id : merged ? merged.id : ids.categoryId(POOL_CATEGORY_KEY + name);
+    const catIds = [categoryId];
     const epgKey = tile._epg && pool.epgData[tile._epg]?.length ? tile._epg : null;
     const archived = !!tile._catchup && !(noArchive && noArchive.has(tile._key));
     const stream = {
@@ -175,21 +185,21 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
       homeLists[slot.category].list[slot.rank] = stream;
       continue;
     }
+    if (merged) {
+      merged.rest.push(stream);
+      continue;
+    }
     let group = byCategory.get(categoryId);
     if (!group) {
-      byCategory.set(categoryId, (group = { id: categoryId, name: groups[0], list: [], home: 0 }));
-      provider.push(group);
+      byCategory.set(categoryId, (group = { id: categoryId, name, theme, country: atHome ? "" : country, list: [] }));
+      pooled.push(group);
     }
     group.list.push(stream);
-    if (curated && country === curated.country) group.home++;
   }
-  const ordered = homeLists.map((c) => ({ ...c, list: c.list.filter(Boolean) })).filter((c) => c.list.length);
-  if (curated) {
-    const isHome = (g) => g.home * 2 > g.list.length;
-    ordered.push(...provider.filter(isHome), ...provider.filter((g) => !isHome(g)));
-  } else {
-    ordered.push(...provider);
-  }
+  const ordered = homeLists.map((c) => ({ ...c, list: [...c.list.filter(Boolean), ...c.rest] })).filter((c) => c.list.length);
+  // Home-country categories first, then each other country's, each in the list's own order.
+  pooled.sort((a, b) => a.country.localeCompare(b.country) || categoryRank(a.theme) - categoryRank(b.theme));
+  ordered.push(...pooled);
   const gz = (value) => zlib.gzipSync(JSON.stringify(value));
   const categories = ordered.map((c) => ({ category_id: String(c.id), category_name: c.name, parent_id: 0 }));
   const streamList = [];
