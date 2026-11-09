@@ -424,34 +424,51 @@ class M3UEPGAddon {
         const schedule = getSchedule(now);
         const activity = getLiveActivity(now);
         const tv = getTvSchedule(now);
-        if (!this.eventIndex || this.eventIndexFor !== this.channels || this.eventIndexEpg !== this.epgData ||
-            this.eventIndexSchedule !== schedule.version || this.eventIndexTv !== tv.version || now - this.eventIndexAt > EVENT_INDEX_TTL_MS) {
-            const buildStart = Date.now();
-            this.eventIndex = buildEventIndex(this.channels, {
-                now,
-                groupOf: c => this.channelGroup(c),
-                epgData: this.epgData,
-                epgIdOf: c => this.epgIdOf(c),
-                schedule: schedule.games,
-                history: schedule.history,
-                races: schedule.races,
-                tv: tv.shows
-            });
-            // The build runs on the request path and blocks every other request while it runs.
-            const buildMs = Date.now() - buildStart;
-            if (buildMs > SLOW_INDEX_MS) console.warn(`[EVENTS] Event index rebuilt in ${buildMs} ms (${this.eventIndex.size} events)`);
-            this.eventIndexFor = this.channels;
-            this.eventIndexEpg = this.epgData;
-            this.eventIndexSchedule = schedule.version;
-            this.eventIndexTv = tv.version;
-            this.eventIndexAt = now;
-            this.eventIndexActivity = null;
+        const stale = !this.eventIndex || this.eventIndexFor !== this.channels || this.eventIndexEpg !== this.epgData ||
+            this.eventIndexSchedule !== schedule.version || this.eventIndexTv !== tv.version || now - this.eventIndexAt > EVENT_INDEX_TTL_MS;
+        // A rebuild blocks the server for about a second, so once there's an index the request that notices it's stale
+        // gets the old one and the rebuild runs in its own turn of the event loop, not on top of that request's work.
+        if (stale && this.eventIndex) {
+            if (!this.eventIndexPending) {
+                this.eventIndexPending = setImmediate(() => {
+                    this.eventIndexPending = null;
+                    this.rebuildEventIndex();
+                });
+            }
+        } else if (stale) {
+            this.rebuildEventIndex();
         }
         if (this.eventIndexActivity !== activity.version) {
             applyLiveActivity(this.eventIndex, activity.games);
             this.eventIndexActivity = activity.version;
         }
         return this.eventIndex;
+    }
+
+    rebuildEventIndex() {
+        const now = Date.now();
+        const schedule = getSchedule(now);
+        const tv = getTvSchedule(now);
+        this.eventIndex = buildEventIndex(this.channels, {
+            now,
+            groupOf: c => this.channelGroup(c),
+            epgData: this.epgData,
+            epgIdOf: c => this.epgIdOf(c),
+            schedule: schedule.games,
+            history: schedule.history,
+            races: schedule.races,
+            tv: tv.shows
+        });
+        // The build blocks every other request while it runs.
+        const buildMs = Date.now() - now;
+        if (buildMs > SLOW_INDEX_MS) console.warn(`[EVENTS] Event index rebuilt in ${buildMs} ms (${this.eventIndex.size} events)`);
+        this.eventIndexFor = this.channels;
+        this.eventIndexEpg = this.epgData;
+        this.eventIndexSchedule = schedule.version;
+        this.eventIndexTv = tv.version;
+        this.eventIndexAt = now;
+        // Live scores are applied again to the new index on the next read.
+        this.eventIndexActivity = null;
     }
 
     buildLiveNowCatalog(tvCatalog) {
