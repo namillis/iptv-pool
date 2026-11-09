@@ -125,14 +125,14 @@ test("Popular on TV comes before Live Sports and has only the TV events", async 
   const realNow = Date.now;
   Date.now = () => NOW;
   t.after(() => { Date.now = realNow; });
-  const traitors = event("iptv_ev_tv", "The Traitors", NOW - 10 * 60000, ["t-cbs"], { category: "TV", importance: 24 });
+  const traitors = event("iptv_ev_tv", "The Traitors", NOW - 10 * 60000, ["t-cbs"], { category: "TV", importance: 24, network: "CBS" });
   const { base, q } = await start(t, fakePool([traitors]));
   const cats = await (await fetch(`${base}/player_api.php?${q}&action=get_live_categories`)).json();
   assert.deepStrictEqual(cats.slice(0, 2).map((c) => c.category_name), ["Popular on TV", "Live Sports"]);
   const all = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams`)).json();
-  assert.deepStrictEqual(all.slice(0, 3).map((s) => [s.name, s.num]), [["The Traitors", 1], ["Bills @ Chiefs", 2], ["Arsenal vs Chelsea · 7:30 PM EDT", 3]]);
+  assert.deepStrictEqual(all.slice(0, 3).map((s) => [s.name, s.num]), [["CBS", 1], ["Bills @ Chiefs", 2], ["Arsenal vs Chelsea · 7:30 PM EDT", 3]]);
   const tv = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${cats[0].category_id}`)).json();
-  assert.deepStrictEqual(tv.map((s) => s.name), ["The Traitors"]);
+  assert.deepStrictEqual(tv.map((s) => [s.name, s.pool_event.title]), [["CBS", "The Traitors"]], "a TV show is named by its network, with the show under it");
   const sports = await (await fetch(`${base}/player_api.php?${q}&action=get_live_streams&category_id=${cats[1].category_id}`)).json();
   assert.deepStrictEqual(sports.map((s) => s.name), ["Bills @ Chiefs", "Arsenal vs Chelsea · 7:30 PM EDT"]);
 });

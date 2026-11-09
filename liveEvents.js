@@ -1156,14 +1156,23 @@ const TV_LIVE_GUIDE_SCORE = 5;
 
 const NATIONAL_NEWS_RE = /^(?:CNN|HLN|FOX NEWS(?: CHANNEL)?|FOX BUSINESS(?: NETWORK)?|MSNBC|MS NOW|CNBC|NEWSMAX(?: TV)?|NEWSNATION|C-?SPAN ?\d?|CBS NEWS(?: 24\/7)?|ABC NEWS(?: LIVE)?|NBC NEWS(?: NOW)?|PBS|BLOOMBERG(?: TV| TELEVISION)?|SCRIPPS NEWS|LIVENOW FROM FOX|FOX NEWS LIVE NOW|CBC NEWS NETWORK|CTV NEWS(?: CHANNEL)?|CPAC)$/i;
 
-// The big US cable news channels, ranked by audience. Their daytime and evening shows are live.
-const CABLE_NEWS_SCORES = [[/^FOX NEWS(?: CHANNEL| LIVE NOW)?$/i, 8], [/^(?:MSNBC|MS NOW)$/i, 7], [/^CNN(?: NEWS)?$/i, 7],
-    [/^NEWSNATION$/i, 4], [/^NEWSMAX(?: TV)?$/i, 4]];
+// The big US cable news channels, ranked by audience, with the name to show. Their daytime and evening shows are live.
+const CABLE_NEWS = [[/^FOX NEWS(?: CHANNEL| LIVE NOW)?$/i, 8, 'Fox News'], [/^(?:MSNBC|MS NOW)$/i, 7, 'MS NOW'],
+    [/^CNN(?: NEWS)?$/i, 7, 'CNN'], [/^NEWSNATION$/i, 4, 'NewsNation'], [/^NEWSMAX(?: TV)?$/i, 4, 'Newsmax']];
+
+function cableNews(name) {
+    if (!isNorthAmerican(name)) return null;
+    const net = networkName(name).replace(/\s+(?:EAST|WEST|HD|FHD)$/i, '').trim();
+    return CABLE_NEWS.find(([re]) => re.test(net)) || null;
+}
 
 function cableNewsScore(name) {
-    if (!isNorthAmerican(name)) return 0;
-    const net = networkName(name).replace(/\s+(?:EAST|WEST|HD|FHD)$/i, '').trim();
-    return CABLE_NEWS_SCORES.find(([re]) => re.test(net))?.[1] || 0;
+    return cableNews(name)?.[1] || 0;
+}
+
+/** A channel's network as people write it: "CNN" and "NewsNation", not "Cnn" and "Newsnation". */
+function cleanNetwork(channelName) {
+    return cableNews(channelName)?.[2] || titleCase(networkName(channelName));
 }
 
 /** A national news channel, or a network's national feed ("US - NBC"), as opposed to a local station. */
@@ -1276,7 +1285,7 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
             title: tvTitle(s),
             programme: s.show,
             show: showKey(s.show),
-            network: s.network || titleCase(networkName(hits[0].chans[0].name)),
+            network: s.network || cleanNetwork(hits[0].chans[0].name),
             category: s.tentpole ? SPECIAL_CATEGORY : TV_CATEGORY,
             // A news show with few Wikipedia views still ranks as well as its channel's other live news.
             importance: Math.max(tvImportance(s), ...links.map(l => cableNewsScore(l.slot))),
@@ -1317,7 +1326,7 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
                 title,
                 programme: title,
                 show: showKey(title),
-                network: titleCase(networkName(shown[0].name)),
+                network: cleanNetwork(shown[0].name),
                 category: tentpole ? SPECIAL_CATEGORY : TV_CATEGORY,
                 importance: score,
                 special: !!tentpole,

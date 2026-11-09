@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { currentEvents, eventState, categoryOf } = require("../liveEvents");
+const { currentEvents, eventState, categoryOf, isTvEvent } = require("../liveEvents");
 
 const LIVE_SPORTS = "Live Sports";
 const POPULAR_TV = "Popular on TV";
@@ -101,7 +101,8 @@ function poolEvent(e) {
     description = gameDescription(e.info);
   } else {
     const guide = e.guide || {};
-    const named = [e.league, e.programme, guide.t].map((s) => programmeName(s, e.teams)).find(Boolean);
+    // A TV show's title is the guide line, with its "Season Premiere" mark, since the channel name is the network.
+    const named = isTvEvent(e) ? e.title : [e.league, e.programme, guide.t].map((s) => programmeName(s, e.teams)).find(Boolean);
     title = named || category || e.network || "Live event";
     description = guide.d || (guide.st && !e.title.includes(guide.st) ? guide.st : null);
   }
@@ -136,7 +137,10 @@ function buildEvents(pool, { countries = [], categoryId, categoryName, kind = nu
     if (!members.length) continue;
     const guided = tiles.find((t) => t._epg && pool.epgData[t._epg]?.length);
     const live = eventState(e, now) === "live";
-    const name = live ? e.title : `${e.title} · ${pool.formatEventTime(e.start, now)}`;
+    // A TV show is named by its network ("Fox News", "NBC"); the show is the guide line under it. A game keeps its
+    // matchup as the name, with the league under it.
+    const base = isTvEvent(e) ? e.network || tiles[0].name || e.title : e.title;
+    const name = live ? base : `${base} · ${pool.formatEventTime(e.start, now)}`;
     const id = eventNumber(e.id, taken);
     taken.add(id);
     const epgKey = guided ? guided._epg : null;
