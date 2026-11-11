@@ -59,3 +59,37 @@ test("the provider country is still the fallback when the category names no coun
   p.merge();
   assert.deepStrictEqual(p.channels.map((t) => t._key).sort(), ["UK|BBCONE", "US|CNN"]);
 });
+
+test("a guide id one provider put on unrelated channels is dropped from the ones it doesn't name", () => {
+  const tvg = (id, name, category, tvgId) => ({ ...ch(id, name, category), attributes: { "group-title": category, "tvg-id": tvgId } });
+  const p = pool([["polar", "US"], ["nova", "US"]]);
+  p.childById.get("polar").channels = [
+    tvg("1", "USA | Horror by Alter", "USA", "3tvktvkphoenixaz.us"),
+    tvg("2", "USA Laff More", "USA", "3tvktvkphoenixaz.us"),
+    tvg("3", "USA | Ebony TV", "USA", "3tvktvkphoenixaz.us"),
+    tvg("4", "SE - SVT 1 SKÅNE", "Sweden", "svt1.se"),
+    tvg("5", "SE - SVT 1 JÄMTLAND", "Sweden", "svt1.se"),
+    tvg("6", "US - ESPN", "USA", "espn.us"),
+    tvg("7", "CA CBC News Network", "Canada", "cbcnewsnetwork.ca"),
+    tvg("8", "CA CBC News Toronto", "Canada", "cbcnewsnetwork.ca"),
+    tvg("10", "DE: SKY SPORT BUNDESLIGA 5 HD", "Germany", "skybundesliga5.de"),
+    tvg("11", "DE: |WOW| SKY SPORT BUNDESLIGA 5", "Germany", "skybundesliga5.de"),
+  ];
+  p.childById.get("nova").channels = [tvg("9", "US - HORROR BY ALTER FHD", "USA", "horrorbyalter.us")];
+  const listing = [{ s: 1, e: 2, t: "Programme" }];
+  p.childById.get("polar").epgData = { "3tvktvkphoenixaz.us": listing, "svt1.se": listing, "espn.us": listing, "cbcnewsnetwork.ca": listing, "skybundesliga5.de": listing };
+  p.childById.get("nova").epgData = { "horrorbyalter.us": [{ s: 1, e: 2, t: "Night of the Living Dead" }] };
+  p.merge();
+  const epg = new Map(p.channels.map((t) => [t._key, t._epg]));
+  assert.strictEqual(epg.get("US|HORRORBYALTER"), "nova/horrorbyalter.us");
+  assert.strictEqual(epg.get("US|LAFFMORE"), null);
+  assert.strictEqual(epg.get("US|EBONY"), null);
+  assert.strictEqual(epg.get("SE|SVT1SKÅNE"), "polar/svt1.se");
+  assert.strictEqual(epg.get("SE|SVT1JÄMTLAND"), "polar/svt1.se");
+  assert.strictEqual(epg.get("US|ESPN"), "polar/espn.us");
+  const guideOf = (name) => p.channels.find((t) => t.name.includes(name))._epg;
+  assert.strictEqual(guideOf("CBC News Toronto"), "polar/cbcnewsnetwork.ca");
+  assert.strictEqual(guideOf("CBC News Network"), "polar/cbcnewsnetwork.ca");
+  const bundesliga = p.channels.filter((t) => /BUNDESLIGA/.test(t.name));
+  assert.ok(bundesliga.length >= 1 && bundesliga.every((t) => t._epg === "polar/skybundesliga5.de"));
+});

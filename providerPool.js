@@ -14,6 +14,64 @@ const COUNTRY_RE = /^[A-Z]{2,3}$/;
 const TILE_PREFIX = 'iptv_ch_';
 const ACCOUNT_CACHE_MS = 5 * 60 * 1000;
 
+const GENERIC_WORDS = new Set(['HD', 'FHD', 'UHD', 'SD', '4K', '8K', 'HDR', 'HEVC', 'RAW', 'TV', 'THE', 'AND', 'OF', 'CHANNEL', 'NETWORK', 'VIP',
+    'BY', 'LIVE', 'SPORT', 'SPORTS', 'NEWS', 'CH', 'MULTI', 'USA', 'US', 'UK', 'CA', 'EN', 'FR', 'DE', 'ES']);
+
+const compactName = (s) => String(s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// The words that tell one channel from another, without its [prefix]: "GR - Horror by Alter" -> HORROR, ALTER.
+const nameWords = (name, prefix) => new Set(String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase().split(/[^A-Z0-9]+/)
+    .filter(w => w.length >= 2 && w !== prefix && !/^\d+$/.test(w) && !GENERIC_WORDS.has(w)));
+
+// "polar/3tvktvkphoenixaz.us" -> "3tvktvkphoenixaz": the channel part of a member's guide key, without the provider or country.
+const guideStem = (guideKey) => compactName(guideKey.slice(guideKey.indexOf('/') + 1).split('.')[0]);
+
+// Which of [names] (tile key -> channel name) a shared guide id [guide] really belongs to. A channel whose name carries the
+// id keeps it, along with the channels whose names share a word with it ("CA CBC News Toronto" on cbcnewsnetwork.ca).
+// With no such channel, the id stays only on a set of like-named channels that makes up most of them ("Sky Sport
+// Bundesliga 5", "... 6"); unrelated channels sharing it (Horror by ALTER, Laff More, Ebony TV) all lose it.
+function guideOwners(guide, names) {
+    const stem = guideStem(guide);
+    const keys = [...names.keys()];
+    const words = new Map(keys.map(k => [k, nameWords(names.get(k), k.slice(0, k.indexOf('|')))]));
+    const linked = (a, b) => [...words.get(a)].some(w => words.get(b).has(w));
+    const reach = (start) => {
+        const seen = new Set(start);
+        for (const k of seen) for (const o of keys) if (!seen.has(o) && linked(k, o)) seen.add(o);
+        return seen;
+    };
+    const carries = (k) => compactName(k.slice(k.indexOf('|') + 1)).includes(stem) || compactName(names.get(k)).includes(stem);
+    const anchors = stem.length >= 2 ? keys.filter(carries) : [];
+    if (anchors.length) return reach(anchors);
+    let largest = new Set();
+    for (const k of keys) {
+        if (largest.has(k)) continue;
+        const group = reach([k]);
+        if (group.size > largest.size) largest = group;
+    }
+    return largest.size * 2 > keys.length ? largest : new Set();
+}
+
+// Providers sometimes give unrelated channels one guide id: Polar tags Horror by ALTER, Laff More and Ebony TV with
+// Phoenix's KTVK guide, so a Suns game on KTVK looked like it aired on all of them. A guide id on one channel name is
+// left alone; a shared one is kept only by the channels [guideOwners] picks.
+function misfiledGuides(members) {
+    const namesByGuide = new Map();
+    for (const m of members) {
+        if (!m._epgKey || !m._key) continue;
+        let names = namesByGuide.get(m._epgKey);
+        if (!names) namesByGuide.set(m._epgKey, names = new Map());
+        if (!names.has(m._key)) names.set(m._key, m.name);
+    }
+    const misfiled = new Set();
+    for (const [guide, names] of namesByGuide) {
+        if (names.size < 2) continue;
+        const owners = guideOwners(guide, names);
+        for (const key of names.keys()) if (!owners.has(key)) misfiled.add(`${guide}\n${key}`);
+    }
+    return misfiled;
+}
+
 function loadPoolConfig(file) {
     let raw;
     try {
@@ -187,10 +245,13 @@ class ProviderPool extends M3UEPGAddon {
         const cache = new Map();
         let placeholders = 0;
         for (const m of members) if (!m._key) placeholders++;
+        const misfiled = misfiledGuides(members);
         const tiles = groups.map(({ key, members: list }) => {
+            const dropped = list.filter(m => misfiled.has(`${m._epgKey}\n${key}`)).map(m => m._epgKey).join('\n');
             const prev = this.tileCache.get(key);
-            const tile = prev && this.sameMembers(prev.list, list) ? prev.tile : this.buildTile(key, list);
-            cache.set(key, { list, tile });
+            const reuse = prev && prev.dropped === dropped && this.sameMembers(prev.list, list);
+            const tile = reuse ? prev.tile : this.buildTile(key, list, new Set(dropped ? dropped.split('\n') : []));
+            cache.set(key, { list, tile, dropped });
             return tile;
         });
         this.tileCache = cache;
@@ -198,10 +259,11 @@ class ProviderPool extends M3UEPGAddon {
         return tiles;
     }
 
-    buildTile(key, list) {
+    buildTile(key, list, misfiledGuideKeys = new Set()) {
         const { primary, ordered } = this.orderMembers(list);
         const rep = primary[0];
-        const guided = ordered.find(m => m._epgKey && this.epgData[m._epgKey]?.length);
+        const trusted = m => m._epgKey && !misfiledGuideKeys.has(m._epgKey);
+        const guided = ordered.find(m => trusted(m) && this.epgData[m._epgKey]?.length);
         const logo = ordered.map(m => m.logo || m.attributes?.['tvg-logo']).find(Boolean) || null;
         const catchup = ordered.find(m => this.childById.get(m._pid).catchupEnabledFor(m)) || null;
         const groupNames = [...new Set(ordered.map(m => this.channelGroup(m)).filter(Boolean))];
@@ -217,7 +279,7 @@ class ProviderPool extends M3UEPGAddon {
             _members: ordered,
             _primary: primary,
             _groups: groupNames,
-            _epg: (guided || rep)._epgKey,
+            _epg: guided ? guided._epgKey : trusted(rep) ? rep._epgKey : null,
             _catchup: catchup,
             _search: null
         };
