@@ -425,13 +425,40 @@ In the app, add an Xtream provider with server `https://yourname.duckdns.org` an
 - **Popular on TV** and **Live Sports** come first when anything is on: the same live and upcoming events as Stremio's two lists (TV shows and specials, then sports), one channel each ("Bills @ Chiefs", or "Arsenal vs Chelsea · 7:30 PM EDT" before kickoff). Playing one goes through the event's ranked channels in order, with the usual failover, keeping only channels from the login's countries. Its guide entry is the first of those channels that has a guide. Event numbers start at 1,000,000,000, so they never clash with channel numbers. They aren't saved, because events only last a day. The list is rebuilt at most once a minute.
 - Movies and series come back empty.
 
-**Playback.** The server doesn't relay video. A stream request (`/live/...`) gets a redirect to one provider's own stream URL, so the provider sees the TV's IP and the server only answers one small request per channel change. That puts the provider's login in the URL the TV receives, so only give these logins to your own devices.
+**Playback.** Unless the [stream relay](#xtream-login-for-iptv-apps) below is on, the server doesn't relay video. A stream request (`/live/...`) gets a redirect to one provider's own stream URL, so the provider sees the TV's IP and the server only answers one small request per channel change. That puts the provider's login in the URL the TV receives, so only give these logins to your own devices.
 
 - **Which provider:** providers in `providers.json` order, skipping any whose account looks full. "Full" counts this server's own streams plus the account's connections in use (checked every 5 minutes, sooner when the first choice looks full).
 - **Leases:** each login holds one stream at a time. Changing channel frees the provider the old one used. A login that goes quiet keeps its lease for 4 hours, so a TV turned off mid-stream holds its provider until then.
 - **Failover:** asking for the same channel again within a minute counts as a failure, and the next provider is used. That's what an app's retry does. Right after a channel change on the same provider, the first two quick retries within 10 seconds stay put, because one-connection accounts often refuse the new stream for a moment. HLS (`.m3u8`) requests always stay on the same provider.
 - **Catch-up:** `get_simple_data_table` and both archive URL forms (`/timeshift/...` and `/streaming/timeshift.php`) go to the provider that has the archive. The server reports its time zone as UTC, and archive start times are converted to that provider's own zone. When a provider's catch-up list for a channel is empty, the next provider with catch-up for it is tried (up to 3), and replays use the first one that has listings. When every one is empty, the channel stops being advertised with `tv_archive`. Both are remembered for 12 hours in `XTREAM_DATA_DIR/xtream-archive.json`, then checked again.
-- **Limits:** 60 API calls and 30 stream requests per minute per login.
+- **Limits:** 300 API calls and 30 stream requests per minute per login.
+
+**Stream relay (optional).** With `RELAY_PORT` set, live MPEG-TS (`.ts`) goes through the server instead of a redirect. HLS and catch-up still redirect. The relay runs as its own process on that port, so a busy moment in the main process never stalls a stream. Route `/relay/*` to it in Caddy, with buffering off:
+
+```
+iptv.yourname.duckdns.org {
+    handle /relay/* {
+        reverse_proxy iptv:7001 {
+            flush_interval -1
+        }
+    }
+    reverse_proxy iptv:7000
+}
+```
+
+```
+RELAY_PORT=7001
+RELAY_USERS=*
+```
+
+`RELAY_USERS` is `*` for every login, or a comma-separated list of logins to try it on first.
+
+- **Start:** the TV's request gets a redirect to `/relay/<session>.ts`. The relay opens the channel's first two streams (from different providers) at once and keeps the first that sends video, then the next two, for up to 10 seconds. A 401, an error page or a stream that isn't MPEG-TS is passed over in a fraction of a second, so the TV never waits on a stream that doesn't play.
+- **Failover mid-show:** when the stream drops or falls 1.5 seconds behind real time, the relay moves to the next stream on the same connection to the TV. The output keeps one set of packet ids and its own program table, timestamps carry on from the last stream, and each new stream starts on a picture with its parameter sets, so the player plays on from its buffer. When the new stream's audio format differs (another AAC profile, say), the TV's connection is reset instead, so the app reopens the channel. After 3 failed rounds in a row it gives up and the app's own retry takes over.
+- **Order:** streams that failed in the last 2 minutes go last, then streams on a full account, then by how often each stream (or, with few plays, its provider) started and kept playing, with the record halving every 6 hours. `pool_sources` lists the best 3 in that order.
+- **Server refused:** a provider that turns the server away 3 times in a row (some block datacenter IPs) is skipped by the relay for 30 minutes. When nothing plays from the server, the TV is redirected to that provider's stream directly, as without the relay.
+- **Sharing:** two TVs on the same channel share one provider connection. A TV that joins starts on the last full picture. A picked `source=` stream gets its own connection.
+- **Bandwidth:** each stream crosses the server twice, about 2 to 8 Mbit/s each way.
 - **App signals (optional):** `player_api.php?action=pool_info` returns `{"pool":1,"version":1,"features":["retry","stop","sources","event_info"]}`, so an app can tell the pool from a plain panel. An app that adds `?try=N` to live URLs (0 on open, one more on each retry, plus `&why=refused` for a 401/403/429) gets failover only when N goes up, instead of the one-minute guess. `action=pool_stop&stream_id=N` releases that stream's lease when playback stops, so the provider is free for another TV right away. `action=pool_sources&stream_id=N` lists the channel's streams in failover order (provider, channel name, quality, backup, and which one this login is on). Adding `&source=<key>` from that list to a live URL plays that stream. Retries after it fail over as usual. Apps that send neither keep the default behaviour above. Each Live Now channel in `get_live_streams` also carries a `pool_event` (`title`, optional `description` and `category`, `start` and `end` in Unix seconds) for an app to show instead of the borrowed channel's guide. ESPN games get their league and week or round, the teams with their records, the venue and the national networks; never scores.
 
 ---
@@ -523,6 +550,8 @@ curl -X POST http://localhost:7000/api/prefetch \
 | `POOL_FILE` | `./providers.json` | Path to the pool's provider list |
 | `XTREAM_USERS_FILE` | unset | Turns on the [Xtream login](#xtream-login-for-iptv-apps) for IPTV apps when the file exists |
 | `XTREAM_DATA_DIR` | `./xtream-data` | Writable folder for the Xtream channel numbers |
+| `RELAY_PORT` | unset | Turns on the [stream relay](#xtream-login-for-iptv-apps) for live TS on this port |
+| `RELAY_USERS` | `*` | Logins whose live streams go through the relay: `*` or a comma-separated list |
 | `DEBUG_MODE` | `false` | Enables verbose diagnostic logs |
 | `PREFETCH_ENABLED` | `true` | Enable server-side prefetch CORS bypass |
 | `PREFETCH_MAX_BYTES` | `5000000` | Max bytes returned from `/api/prefetch` |
