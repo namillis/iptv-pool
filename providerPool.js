@@ -5,7 +5,7 @@ const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 
 const SEP = '~';
 const ID_RE = /^[a-z0-9]{1,8}$/;
-const MAX_PROVIDERS = 10;
+const MAX_PROVIDERS = 20;
 const POOL_CONCURRENCY = 2;
 const RETRY_MS = 10 * 60 * 1000;
 const POOL_ADDON_ID = 'org.stremio.m3u-epg-addon.pool';
