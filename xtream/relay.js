@@ -567,7 +567,10 @@ class Relay {
       if (result.closed) return res.writeHead(503).end();
       if (!result.ok) {
         upstream.close("did not start");
-        const tried = result.failures.map((f) => `${f.candidate.pid} ${f.error.status ? `HTTP ${f.error.status}` : f.error.code || f.error.message}`).join(", ");
+        const tried = [
+          ...result.failures.map((f) => `${f.candidate.pid} ${f.error.status ? `HTTP ${f.error.status}` : f.error.code || f.error.message}`),
+          ...s.candidates.filter((c) => c.redirectOnly).map((c) => `${c.pid} skipped, it refused the server lately`),
+        ].join(", ");
         if (result.redirect) {
           this.log(`[RELAY] ${s.user} "${s.channel}" nothing played from the server (${tried || "no candidates"}); redirecting`);
           res.setHeader("Location", result.redirect);
