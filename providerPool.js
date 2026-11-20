@@ -260,7 +260,7 @@ class ProviderPool extends M3UEPGAddon {
         this.lastUpdate = lastUpdate;
         this.buildGenresInManifest();
         this.mergedAt = Date.now();
-        if (tiles.length) console.log(`[POOL] Merged ${members.length} streams into ${tiles.length} channels in ${this.mergedAt - started} ms`);
+        if (tiles.length) console.log(`[POOL] Merged ${members.length} streams into ${tiles.length} channels in ${this.mergedAt - started} ms, heap ${Math.round(process.memoryUsage().heapUsed / 1048576)} MB`);
     }
 
     /**
