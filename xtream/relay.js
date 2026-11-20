@@ -333,7 +333,8 @@ class Upstream {
     if (this.closed) return;
     if (++this.recoveries > RECOVERY_ROUNDS) return this.close("no stream recovered");
     const next = this.recoveryCandidates();
-    this.log(`[RELAY] "${this.key}" ${from.pid} ${why} after ${Math.round(playedMs / 1000)} s; trying ${next.slice(0, RACE_WIDTH).map((c) => c.pid).join(", ") || "nothing"}`);
+    const pids = [...new Set(next.map((c) => c.pid))].slice(0, RACE_WIDTH);
+    this.log(`[RELAY] "${this.key}" ${from.pid} ${why} after ${Math.round(playedMs / 1000)} s; trying ${pids.join(", ") || "nothing"}`);
     if (!next.length) return this.close("no streams");
     this.switching = this.raceImpl(next, { userAgent: this.userAgent, onAttempt: (b, d) => this.onAttempt(b, d) }).then(({ winner, conn, failures }) => {
       this.switching = null;
