@@ -75,7 +75,14 @@ test("a TV joining mid-stream starts with the tables and the last keyframe", () 
   assert.strictEqual(join[0].pid, 0);
   assert.strictEqual(join[1].pid, OUT_PMT_PID);
   const firstVideo = join.find((p) => p.pid === OUT_VIDEO_PID);
-  assert.strictEqual(firstVideo.dts, 1_000_000 + 20 * 3000, "from the keyframe at frame 20");
+  assert.strictEqual(firstVideo.dts, 1_000_000, "from the first keyframe: less than the backlog has played");
+
+  // 20 s of video (frames are 1/30 s): a joining TV gets about the last 8 s, starting on a keyframe.
+  n.push(Buffer.concat(Array.from({ length: 600 }, () => Buffer.concat(src.frameOut()))));
+  const later = parse(n.joinPrefix()).filter((p) => p.pid === OUT_VIDEO_PID && p.dts !== null);
+  const span = (later[later.length - 1].dts - later[0].dts) / 90000;
+  assert.ok(span >= 8 && span < 9, `the backlog covers about 8 s (${span.toFixed(2)})`);
+  assert.strictEqual((later[0].dts - 1_000_000) % (10 * 3000), 0, "and starts on a keyframe");
   const after = parse(n.push(Buffer.concat(src.frameOut())));
   assert.ok(after.length > 0);
 });

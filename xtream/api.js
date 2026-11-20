@@ -815,7 +815,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     const id = relay.open({
       user: user.username, userMax: user.maxConnections, streamId, channel: tile.name, channelKey: tile._key, candidates, picked: !!picked,
     });
-    const reason = picked ? "relay-picked" : signal && signal.attempt > 1 ? "relay-retry" : "relay";
+    const reason = picked ? "relay-picked" : signal && signal.attempt > 0 ? `relay-retry ${signal.attempt}` : "relay";
     log.log(`[XTREAM] ${user.username} live ${streamId} "${tile.name}" -> relay (${candidates.slice(0, 3).map((c) => c.pid).join(", ")}${candidates.length > 3 ? ", ..." : ""}; ${reason})`);
     if (metrics) metrics.play({ user: user.username, streamId, channel: tile.name, pid: candidates[0].pid, reason, from: null, attempt: signal ? signal.attempt : null });
     const proto = (req.get("x-forwarded-proto") || req.protocol).split(",")[0];
