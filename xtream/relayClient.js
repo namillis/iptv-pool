@@ -50,8 +50,10 @@ class Tally {
 }
 
 class SourceRecord {
-  constructor({ now = Date.now } = {}) {
+  /** [accountFull] says whether a provider's account had no free connection, so its refusal says nothing about the server. */
+  constructor({ now = Date.now, accountFull = () => false } = {}) {
     this.now = now;
+    this.accountFull = accountFull;
     this.byKey = new Map();
     this.byPid = new Map();
     this.failedAt = new Map();
@@ -85,7 +87,7 @@ class SourceRecord {
     this.tally(this.byKey, o.key).add(t, false);
     this.tally(this.byPid, o.pid).add(t, false);
     this.failedAt.set(o.key, t);
-    if (o.refused) {
+    if (o.refused && !this.accountFull(o.pid)) {
       const n = (this.refusals.get(o.pid) || 0) + 1;
       this.refusals.set(o.pid, n);
       if (n >= REFUSALS_TO_REDIRECT) this.redirectUntil.set(o.pid, t + REDIRECT_ONLY_MS);
@@ -97,7 +99,10 @@ class SourceRecord {
     return at !== undefined && this.now() - at < RECENT_FAIL_MS;
   }
 
-  /** The provider refused the server REFUSALS_TO_REDIRECT times in a row: TVs go to it directly for a while. */
+  /**
+   * The provider refused the server REFUSALS_TO_REDIRECT times in a row while its account had room (some block
+   * datacenter IPs): TVs go to it directly for a while. A refusal from a full account doesn't count.
+   */
   redirectOnly(pid) {
     const until = this.redirectUntil.get(pid);
     if (until === undefined) return false;

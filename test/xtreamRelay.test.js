@@ -225,3 +225,13 @@ test("a provider that refuses the server three times in a row is handed to TVs d
   rec.record({ key: "u/1", pid: "u", ok: true, started: true });
   assert.ok(!rec.redirectOnly("u"), "a stream that plays clears it");
 });
+
+test("a refusal while the provider's account is full doesn't make it redirect-only", () => {
+  const full = new Set(["u"]);
+  const rec = new SourceRecord({ accountFull: (pid) => full.has(pid) });
+  for (let i = 0; i < 3; i++) rec.record({ key: `u/${i}`, pid: "u", ok: false, refused: true });
+  assert.ok(!rec.redirectOnly("u"));
+  full.clear();
+  for (let i = 0; i < 3; i++) rec.record({ key: `u/${i}`, pid: "u", ok: false, refused: true });
+  assert.ok(rec.redirectOnly("u"));
+});

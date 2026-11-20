@@ -93,3 +93,34 @@ test("a guide id one provider put on unrelated channels is dropped from the ones
   const bundesliga = p.channels.filter((t) => /BUNDESLIGA/.test(t.name));
   assert.ok(bundesliga.length >= 1 && bundesliga.every((t) => t._epg === "polar/skybundesliga5.de"));
 });
+
+test("a guide id one provider put on thousands of channels is sorted out quickly", () => {
+  const tvg = (id, name, tvgId) => ({ ...ch(id, name, "USA"), attributes: { "group-title": "USA", "tvg-id": tvgId } });
+  const p = pool([["prem", "US"]]);
+  const words = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet"];
+  p.childById.get("prem").channels = Array.from({ length: 4000 }, (_, i) =>
+    tvg(String(i), `US: ${words[i % 10]} ${words[Math.floor(i / 10) % 10]} ${words[Math.floor(i / 100) % 10]} Z${i}`, "none.us"));
+  p.childById.get("prem").epgData = { "none.us": [{ s: 1, e: 2, t: "Programme" }] };
+  const start = Date.now();
+  p.merge();
+  assert.ok(Date.now() - start < 3000, `merge took ${Date.now() - start} ms`);
+  // Every name shares a word with another, so they form one group that is most of them, and keep the id.
+  assert.ok(p.channels.every((t) => t._epg === "prem/none.us"));
+});
+
+test("refreshes close together share one merge", async () => {
+  const p = pool([["a", "US"], ["b", "US"]]);
+  p.childById.get("a").channels = [ch("1", "US: ESPN", "US")];
+  p.merge();
+  let merges = 0;
+  const merge = p.merge.bind(p);
+  p.merge = () => { merges++; merge(); };
+  p.requestMerge();
+  p.requestMerge();
+  assert.strictEqual(merges, 0, "a merge just ran, so the next one waits");
+  assert.ok(p.mergeTimer);
+  p.mergedAt -= 61 * 1000;
+  p.requestMerge();
+  assert.strictEqual(merges, 1);
+  assert.strictEqual(p.mergeTimer, null, "the waiting merge was the one that ran");
+});

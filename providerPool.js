@@ -8,6 +8,7 @@ const ID_RE = /^[a-z0-9]{1,8}$/;
 const MAX_PROVIDERS = 20;
 const POOL_CONCURRENCY = 2;
 const RETRY_MS = 10 * 60 * 1000;
+const MERGE_GAP_MS = 60 * 1000;
 const POOL_ADDON_ID = 'org.stremio.m3u-epg-addon.pool';
 const POOL_ADDON_NAME = 'M3U/EPG TV Pool';
 const COUNTRY_RE = /^[A-Z]{2,3}$/;
@@ -33,22 +34,37 @@ const guideStem = (guideKey) => compactName(guideKey.slice(guideKey.indexOf('/')
 function guideOwners(guide, names) {
     const stem = guideStem(guide);
     const keys = [...names.keys()];
-    const words = new Map(keys.map(k => [k, nameWords(names.get(k), k.slice(0, k.indexOf('|')))]));
-    const linked = (a, b) => [...words.get(a)].some(w => words.get(b).has(w));
-    const reach = (start) => {
-        const seen = new Set(start);
-        for (const k of seen) for (const o of keys) if (!seen.has(o) && linked(k, o)) seen.add(o);
-        return seen;
+    // Channels are linked when their names share a word, and a chain of links joins them. The groups are found by
+    // joining each channel to the first one with each of its words, so a guide id one provider put on thousands of
+    // channels costs a pass over their words, not a comparison of every pair.
+    const parent = new Map(keys.map(k => [k, k]));
+    const find = (k) => {
+        while (parent.get(k) !== k) {
+            parent.set(k, parent.get(parent.get(k)));
+            k = parent.get(k);
+        }
+        return k;
     };
+    const firstWith = new Map();
+    for (const k of keys) {
+        for (const w of nameWords(names.get(k), k.slice(0, k.indexOf('|')))) {
+            const other = firstWith.get(w);
+            if (other === undefined) firstWith.set(w, k);
+            else parent.set(find(k), find(other));
+        }
+    }
+    const groups = new Map();
+    for (const k of keys) {
+        const root = find(k);
+        let group = groups.get(root);
+        if (!group) groups.set(root, group = new Set());
+        group.add(k);
+    }
     const carries = (k) => compactName(k.slice(k.indexOf('|') + 1)).includes(stem) || compactName(names.get(k)).includes(stem);
     const anchors = stem.length >= 2 ? keys.filter(carries) : [];
-    if (anchors.length) return reach(anchors);
+    if (anchors.length) return new Set(anchors.flatMap(k => [...groups.get(find(k))]));
     let largest = new Set();
-    for (const k of keys) {
-        if (largest.has(k)) continue;
-        const group = reach([k]);
-        if (group.size > largest.size) largest = group;
-    }
+    for (const group of groups.values()) if (group.size > largest.size) largest = group;
     return largest.size * 2 > keys.length ? largest : new Set();
 }
 
@@ -168,10 +184,23 @@ class ProviderPool extends M3UEPGAddon {
                 } else {
                     child.retryAt = 0;
                 }
-                this.merge();
+                this.requestMerge();
             }
         };
         await Promise.all(Array.from({ length: Math.min(POOL_CONCURRENCY, due.length) }, worker));
+    }
+
+    /**
+     * Merges the providers' new lists. A merge holds up every request for a few seconds, so refreshes that land
+     * close together share one: at most one merge a minute, the rest wait for it. A pool with no channels yet
+     * merges right away.
+     */
+    requestMerge() {
+        const wait = MERGE_GAP_MS - (Date.now() - (this.mergedAt || 0));
+        if (wait <= 0 || !this.channels.length) return this.merge();
+        if (this.mergeTimer) return;
+        this.mergeTimer = setTimeout(() => this.merge(), wait);
+        if (this.mergeTimer.unref) this.mergeTimer.unref();
     }
 
     tagged(child, kind) {
@@ -204,6 +233,9 @@ class ProviderPool extends M3UEPGAddon {
     }
 
     merge() {
+        clearTimeout(this.mergeTimer);
+        this.mergeTimer = null;
+        const started = Date.now();
         const epgData = {};
         let lastUpdate = 0;
         for (const child of this.children) {
@@ -219,6 +251,8 @@ class ProviderPool extends M3UEPGAddon {
         this.series = [].concat(...this.children.map(c => this.tagged(c, 'series')));
         this.lastUpdate = lastUpdate;
         this.buildGenresInManifest();
+        this.mergedAt = Date.now();
+        if (this.channels.length) console.log(`[POOL] Merged ${this.memberCount} streams into ${this.channels.length} channels in ${this.mergedAt - started} ms`);
     }
 
     orderMembers(members) {

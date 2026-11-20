@@ -366,6 +366,9 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   const views = new Map();
   const pendingViews = new Map();
   const playback = new Playback({ now, held: (pid) => (relay ? relay.held(pid) : 0) });
+  // The account state the last relayed play saw, so a refusal from a full account isn't taken as the server being blocked.
+  let relayStatus = null;
+  if (relay) relay.record.accountFull = (pid) => playback.isFull(pid, relayStatus, null);
   const rates = new Map();
   const tables = new LRUCache({ max: 300, ttl: TABLE_TTL_MS });
   let tablesInFlight = 0;
@@ -803,6 +806,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
    * TV to the relay, which races them and fails over mid-show. A picked source goes first and isn't shared.
    */
   function relayLive(req, res, user, streamId, tile, status, signal) {
+    relayStatus = status;
     let members = relayOrder(tile, status);
     const picked = signal && signal.source ? members.find((m) => sourceKey(m) === signal.source) : null;
     if (picked) members = [picked, ...members.filter((m) => m !== picked)];
@@ -896,7 +900,8 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
         max: a && !a.error ? Number(a.maxConnections || 0) || null : null,
         expires: a && !a.error ? a.expiresAt || null : null,
         channels: child.channels.length,
-        leases: leases.get(child.poolId) || 0,
+        // The relay's provider connections are the pool's own too.
+        leases: (leases.get(child.poolId) || 0) + (relay ? relay.held(child.poolId) : 0),
         refreshError: child.retryAt > t ? child.lastError || "refresh failed" : null,
       });
     }
