@@ -375,7 +375,7 @@ function findGame(e, games) {
 // have a game to play or the guide marks it live. [history] holds finished games from the days before yesterday, so
 // last weekend's game shown again on Monday night ("Minnesota Vikings @ New Orleans Saints" on beIN, "NFL Raiders @
 // Jets" on ESPN+) is caught too. A cup listing isn't taken for a replay of a league game between the same teams.
-function dropReplays(byKey, games, history = null) {
+function* dropReplays(byKey, games, history = null) {
     const today = games || [];
     const past = history && history.length ? [...today, ...history] : today;
     if (!past.length) return;
@@ -384,6 +384,7 @@ function dropReplays(byKey, games, history = null) {
     // games only, not all ten days of results.
     const finishedByWord = new Map();
     for (const g of past) {
+        yield;
         if (g.state !== 'post') continue;
         for (const names of g.teams) for (const n of names) for (const w of teamWords(n)) {
             let list = finishedByWord.get(w);
@@ -392,6 +393,7 @@ function dropReplays(byKey, games, history = null) {
         }
     }
     for (const [key, e] of byKey) {
+        yield;
         if (!e.teams || e.listedLive || findGame(e, today)) continue;
         const candidates = new Set();
         for (const w of teamWords(e.teams[0])) for (const g of finishedByWord.get(w) || []) candidates.add(g);
@@ -466,9 +468,10 @@ function applyLiveActivity(index, games) {
     }
 }
 
-function annotateWithSchedule(byKey, games, now) {
+function* annotateWithSchedule(byKey, games, now) {
     if (!games || !games.length) return;
     for (const e of byKey.values()) {
+        yield;
         if (!e.teams) continue;
         const g = findGame(e, games);
         if (!g) continue;
@@ -609,8 +612,9 @@ function unmarkedTeamlessReplay(p, g, label, epgId) {
     return !g.teams && !p.l && /\.uk$/i.test(epgId) && LIVE_MARKING_CHANNEL_RE.test(label) && !LIVE_TITLE_RE.test(p.t || '');
 }
 
-function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
+function* addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, now, races = null) {
     for (const [epgId, list] of Object.entries(epgData || {})) {
+        yield;
         const chans = channelsByEpgId.get(epgId);
         if (!chans || !Array.isArray(list)) continue;
         const first = chans[0];
@@ -667,6 +671,7 @@ function addGuideEvents(byKey, slotEvents, epgData, channelsByEpgId, groupOf, no
         }
     }
     for (const e of byKey.values()) {
+        yield;
         if (!e.brands) continue;
         e.network = topBrand(e.brands) || e.network;
         if (e.baseName) {
@@ -747,13 +752,14 @@ function sportCompatible(sport, title) {
     return false;
 }
 
-function buildNetworkIndex(channels, groupOf) {
+function* buildNetworkIndex(channels, groupOf) {
     const index = new Map();
     const slot = (n) => {
         if (!index.has(n)) index.set(n, { all: [], national: [], mirrors: [] });
         return index.get(n);
     };
     for (const c of channels) {
+        yield;
         if (!c || c.type !== 'tv' || !US_CHANNEL_RE.test(c.name || '')) continue;
         const name = networkName(c.name).toUpperCase();
         const link = { id: c.id, slot: (c.name || '').trim(), source: sourceLabel(groupOf(c)), logo: c.logo || c.attributes?.['tvg-logo'] || null };
@@ -935,9 +941,10 @@ function namesSide(words, names) {
 
 // Two listings of one game under different labels ("Arsenal vs Leeds United", "Arsenal x Leeds") are one event.
 // The one matched to ESPN's schedule is kept, else the first (provider event slots come first).
-function mergeSameMatchups(byKey) {
+function* mergeSameMatchups(byKey) {
     const kept = [];
     for (const [key, e] of byKey) {
+        yield;
         if (!e.teams) continue;
         const i = kept.findIndex(([, o]) => Math.abs(o.start - e.start) <= SAME_MATCHUP_WINDOW_MS && o.start < e.end && e.start < o.end &&
             sameTeams(o.teams, e.teams) &&
@@ -966,10 +973,11 @@ function mergeSameMatchups(byKey) {
 // A guide listing named after its league or show ("Monday Night Football · Sky Sports Main Event", "NHL Hockey ·
 // Premier Sports 2") is usually a game that's already listed by its teams. Fold it into that game when its title,
 // subtitle or description names both sides and the game starts while the listing is on.
-function mergeNamedMatchups(byKey) {
+function* mergeNamedMatchups(byKey) {
     const games = [...byKey.values()].filter(e => e.teams);
     if (!games.length) return;
     for (const [key, e] of byKey) {
+        yield;
         if (e.teams || !e.fromGuide || !e.text) continue;
         const words = new Set(teamWords(e.text));
         let best = null;
@@ -1034,11 +1042,12 @@ function mergeSameBroadcast(byKey) {
     }
 }
 
-function addScheduleNetworks(byKey, games, channels, groupOf, now) {
-    const netIndex = buildNetworkIndex(channels, groupOf);
+function* addScheduleNetworks(byKey, games, channels, groupOf, now) {
+    const netIndex = yield* buildNetworkIndex(channels, groupOf);
     const dayEnd = dayBounds(now).end;
     const byGame = new Map();
     for (const [key, e] of byKey) {
+        yield;
         if (!e.game) continue;
         const first = byGame.get(e.game);
         if (!first) { byGame.set(e.game, e); continue; }
@@ -1048,6 +1057,7 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
     }
     const finished = [];
     for (const g of games) {
+        yield;
         if (g.start >= dayEnd || (g.state !== 'in' && g.start < now - SCHEDULE_BEFORE_MS)) continue;
         if (g.state === 'post') {
             finished.push(g);
@@ -1103,6 +1113,7 @@ function addScheduleNetworks(byKey, games, channels, groupOf, now) {
     // A listing named after its league ("College Football · SEC Network") that is a game ESPN shows as finished is
     // over too. Left alone, it would come back as its own event once the game stops absorbing it.
     for (const g of finished) {
+        yield;
         for (const [key] of genericListings(byKey, g, exactNetworks(g, games))) byKey.delete(key);
     }
 }
@@ -1234,7 +1245,7 @@ function tvTitle(s) {
 }
 
 /** The North American guide listings around now, by show name, each with the channel it airs on. */
-function guideListingsByShow(epgData, channelsByEpgId, now) {
+function* guideListingsByShow(epgData, channelsByEpgId, now) {
     const byShow = new Map();
     const add = (key, hit) => {
         if (!key) return;
@@ -1242,6 +1253,7 @@ function guideListingsByShow(epgData, channelsByEpgId, now) {
         byShow.get(key).push(hit);
     };
     for (const [epgId, list] of Object.entries(epgData || {})) {
+        yield;
         const chans = (channelsByEpgId.get(epgId) || []).filter(c => isNorthAmerican(c.name));
         if (!chans.length || !Array.isArray(list)) continue;
         for (const p of list) {
@@ -1293,10 +1305,11 @@ function addTvEntry(byKey, key, fields, links) {
  * election night, the Olympics) that only the guide lists. One already in the index as a sports listing is
  * moved up by the tentpole's score instead of being listed twice.
  */
-function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
-    const byShow = guideListingsByShow(epgData, channelsByEpgId, now);
+function* addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
+    const byShow = yield* guideListingsByShow(epgData, channelsByEpgId, now);
     const used = new Set();
     for (const s of shows || []) {
+        yield;
         if (s.end <= now - GUIDE_BEFORE_MS || s.start >= now + GUIDE_AHEAD_MS) continue;
         const episode = showKey(s.episode);
         const hits = (byShow.get(showKey(s.show)) || [])
@@ -1326,6 +1339,7 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
     }
     for (const list of byShow.values()) {
         for (const { p, chans, start, rest } of list) {
+            yield;
             if (rest !== undefined || used.has(p) || p.e - p.s < MIN_SPECIAL_SECONDS) continue;
             if ((p.r && !p.l) || (!p.l && REPLAY_DESC.test(p.d || ''))) continue;
             const tentpole = tentpoleOf(start, p.t, p.st);
@@ -1368,10 +1382,35 @@ function addTvEvents(byKey, shows, epgData, channelsByEpgId, groupOf, now) {
     }
 }
 
-function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null, tv = null } = {}) {
+function buildEventIndex(channels, options) {
+    const steps = eventIndexSteps(channels, options);
+    let step;
+    while (!(step = steps.next()).done);
+    return step.value;
+}
+
+/**
+ * The same index as buildEventIndex, built in slices of at most about [sliceMs] that let other work run in between.
+ * [channels], the guide and the schedule have to stay unchanged while it builds; the pool replaces them, never edits.
+ */
+async function buildEventIndexSliced(channels, options, sliceMs = 25) {
+    const steps = eventIndexSteps(channels, options);
+    let sliceStart = performance.now();
+    let step;
+    while (!(step = steps.next()).done) {
+        if (performance.now() - sliceStart < sliceMs) continue;
+        await new Promise(resolve => setImmediate(resolve));
+        sliceStart = performance.now();
+    }
+    return step.value;
+}
+
+// buildEventIndex's work, yielding once per channel, guide or event so a caller can pause between any two.
+function* eventIndexSteps(channels, { now = Date.now(), groupOf = c => c.category || c.attributes?.['group-title'], epgData = null, epgIdOf = null, schedule = null, history = null, races = null, tv = null } = {}) {
     const byKey = new Map();
     const channelsByEpgId = new Map();
     for (const c of channels) {
+        yield;
         if (!c || c.type !== 'tv') continue;
         const epgId = epgIdOf ? epgIdOf(c) : null;
         if (epgId) {
@@ -1407,19 +1446,20 @@ function buildEventIndex(channels, { now = Date.now(), groupOf = c => c.category
         if (isAltFeed(ev.title)) link.alt = true;
         entry.channels.push(link);
     }
-    if (epgData) addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
+    if (epgData) yield* addGuideEvents(byKey, [...byKey.values()], epgData, channelsByEpgId, groupOf, now, races);
     dropListedMultiviews(byKey);
     adoptAltCastGame(byKey, schedule);
-    dropReplays(byKey, schedule, history);
+    yield* dropReplays(byKey, schedule, history);
     dropPastWeeks(byKey, schedule);
-    annotateWithSchedule(byKey, schedule, now);
-    if (schedule && schedule.length) addScheduleNetworks(byKey, schedule, channels, groupOf, now);
-    mergeSameMatchups(byKey);
-    mergeNamedMatchups(byKey);
+    yield* annotateWithSchedule(byKey, schedule, now);
+    if (schedule && schedule.length) yield* addScheduleNetworks(byKey, schedule, channels, groupOf, now);
+    yield* mergeSameMatchups(byKey);
+    yield* mergeNamedMatchups(byKey);
     mergeSameChannel(byKey);
     mergeSameBroadcast(byKey);
-    if (epgData) addTvEvents(byKey, tv, epgData, channelsByEpgId, groupOf, now);
+    if (epgData) yield* addTvEvents(byKey, tv, epgData, channelsByEpgId, groupOf, now);
     for (const e of byKey.values()) {
+        yield;
         if (e.game) {
             e.gameTeams = e.game.teams;
             e.info = { league: e.game.sport, ...(e.game.info || {}) };
@@ -1559,4 +1599,4 @@ function todayEvents(index, now = Date.now(), { genre = null, includeAssumed = f
     return out.sort((a, b) => a.start - b.start || a.title.localeCompare(b.title));
 }
 
-module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES, TV_CATEGORIES, isTvEvent };
+module.exports = { isRaceReplay, parseEventSlot, buildEventIndex, buildEventIndexSliced, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, findGame, applyLiveActivity, categoryOf, importanceOf, titleCase, sourceLabel, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES, TV_CATEGORIES, isTvEvent };

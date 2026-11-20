@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { buildEventIndex, currentEvents } = require("../liveEvents");
+const { buildEventIndex, buildEventIndexSliced, currentEvents } = require("../liveEvents");
 const { parseScoreboard } = require("../espnSchedule");
 const { M3UEPGAddon } = require("../addon");
 
@@ -153,6 +153,27 @@ test("a game ESPN lists takes ESPN's name, and every listing of it joins one eve
   const e = [...idx.values()][0];
   assert.deepStrictEqual(e.channels.map((c) => c.id).sort(), ["e66", "e68", "krdo", "mc"]);
   assert.deepStrictEqual(e.channels.filter((c) => c.alt).map((c) => c.id).sort(), ["e68", "mc"]);
+});
+
+test("the sliced build gives the same index as the one-go build, and lets other work run while it builds", async () => {
+  const channels = [
+    slot("mc", "CA - DAZN 05 : MANNINGCAST – MNF WITH PEYTON & ELI – BILLS @ RAMS OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+    slot("e66", "US - ESPN PLUS 66 : BUFFALO BILLS @ LOS ANGELES RAMS OCT 12 – 8:15 PM ET / OCT 13 – 1:15 AM UK"),
+    guideChannel("krdo", "US - ABC 13 COLORADO SPRINGS (KRDO)", "USA LOCALS"),
+    guideChannel("sky", "UK - SKY SPORTS MAIN EVENT"),
+  ];
+  const epgData = {
+    krdo: [{ s: S("2026-10-13T00:15:00Z"), e: S("2026-10-13T03:30:00Z"), t: "Live: NFL Football", d: "The Rams host the Bills at SoFi Stadium." }],
+    sky: [{ s: S("2026-10-13T00:00:00Z"), e: S("2026-10-13T03:00:00Z"), t: "Live Monday Night Football", d: "Buffalo Bills v Los Angeles Rams." }],
+  };
+  const options = { now: MNF + 30 * 60000, groupOf: (c) => c.category, epgData, epgIdOf: (c) => c.epg || null, schedule: [mnfGame()], history: [], tv: [] };
+  const whole = buildEventIndex(channels, options);
+  let otherWorkRan = false;
+  setImmediate(() => { otherWorkRan = true; });
+  const sliced = await buildEventIndexSliced(channels, options, 0);
+  assert.ok(otherWorkRan);
+  assert.ok(whole.size > 0);
+  assert.deepStrictEqual(sliced, whole);
 });
 
 test("'X host Y at venue' is Y @ X", () => {

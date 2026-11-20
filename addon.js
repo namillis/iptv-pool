@@ -6,7 +6,7 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const crypto = require("crypto");
 const LRUCache = require("./lruCache");
 const { parseXmltvStream } = require("./epgParser");
-const { buildEventIndex, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, categoryOf, applyLiveActivity, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES, TV_CATEGORIES } = require("./liveEvents");
+const { buildEventIndex, buildEventIndexSliced, currentEvents, todayEvents, eventState, eventCardUrl, cardTitleFor, categoryOf, applyLiveActivity, programmeVerdict, broadcastNetworkOf, isNationalFeed, isNorthAmerican, SPORT_CATEGORIES, TV_CATEGORIES } = require("./liveEvents");
 const eventCards = require("./eventCard");
 const { getSchedule } = require("./espnSchedule");
 const { getLiveActivity } = require("./polymarketLive");
@@ -429,15 +429,18 @@ class M3UEPGAddon {
         const tv = getTvSchedule(now);
         const stale = !this.eventIndex || this.eventIndexFor !== this.channels || this.eventIndexEpg !== this.epgData ||
             this.eventIndexSchedule !== schedule.version || this.eventIndexTv !== tv.version || now - this.eventIndexAt > EVENT_INDEX_TTL_MS;
-        // A rebuild blocks the server for about a second, so once there's an index the request that notices it's stale
-        // gets the old one. The rebuild waits REBUILD_DELAY_MS, so requests queued behind a provider's channel merge are
-        // answered first, and at least REBUILD_GAP_MS after the last one, so a burst of provider refreshes rebuilds once.
+        // Once there's an index, the request that notices it's stale gets the old one, and the new one is built in
+        // slices that let other requests through. The rebuild waits REBUILD_DELAY_MS, so requests queued behind a
+        // provider's channel merge are answered first, and at least REBUILD_GAP_MS after the last one, so a burst of
+        // provider refreshes rebuilds once. Only the very first index is built in one go.
         if (stale && this.eventIndex) {
-            if (!this.eventIndexPending) {
+            if (!this.eventIndexPending && !this.eventIndexBuilding) {
                 const wait = Math.max(REBUILD_DELAY_MS, this.eventIndexAt + REBUILD_GAP_MS - now);
                 this.eventIndexPending = setTimeout(() => {
                     this.eventIndexPending = null;
-                    this.rebuildEventIndex();
+                    this.eventIndexBuilding = this.rebuildEventIndexSliced()
+                        .catch(e => console.error('[EVENTS] Event index rebuild failed:', e))
+                        .finally(() => { this.eventIndexBuilding = null; });
                 }, wait);
                 if (this.eventIndexPending.unref) this.eventIndexPending.unref();
             }
@@ -451,28 +454,54 @@ class M3UEPGAddon {
         return this.eventIndex;
     }
 
-    rebuildEventIndex() {
+    /** What the event index is built from, read once so a sliced build uses the same inputs throughout. */
+    eventIndexInputs() {
         const now = Date.now();
         const schedule = getSchedule(now);
         const tv = getTvSchedule(now);
-        this.eventIndex = buildEventIndex(this.channels, {
+        return {
             now,
-            groupOf: c => this.channelGroup(c),
+            channels: this.channels,
             epgData: this.epgData,
-            epgIdOf: c => this.epgIdOf(c),
-            schedule: schedule.games,
-            history: schedule.history,
-            races: schedule.races,
-            tv: tv.shows
-        });
-        // The build blocks every other request while it runs.
-        const buildMs = Date.now() - now;
-        if (buildMs > SLOW_INDEX_MS) console.warn(`[EVENTS] Event index rebuilt in ${buildMs} ms (${this.eventIndex.size} events)`);
-        this.eventIndexFor = this.channels;
-        this.eventIndexEpg = this.epgData;
-        this.eventIndexSchedule = schedule.version;
-        this.eventIndexTv = tv.version;
-        this.eventIndexAt = now;
+            scheduleVersion: schedule.version,
+            tvVersion: tv.version,
+            options: {
+                now,
+                groupOf: c => this.channelGroup(c),
+                epgData: this.epgData,
+                epgIdOf: c => this.epgIdOf(c),
+                schedule: schedule.games,
+                history: schedule.history,
+                races: schedule.races,
+                tv: tv.shows
+            }
+        };
+    }
+
+    // Builds the index in one go, blocking every other request while it runs.
+    rebuildEventIndex() {
+        const inputs = this.eventIndexInputs();
+        const index = buildEventIndex(inputs.channels, inputs.options);
+        const buildMs = Date.now() - inputs.now;
+        if (buildMs > SLOW_INDEX_MS) console.warn(`[EVENTS] Event index rebuilt in ${buildMs} ms (${index.size} events)`);
+        this.setEventIndex(inputs, index);
+    }
+
+    async rebuildEventIndexSliced() {
+        const inputs = this.eventIndexInputs();
+        const index = await buildEventIndexSliced(inputs.channels, inputs.options);
+        const buildMs = Date.now() - inputs.now;
+        if (buildMs > SLOW_INDEX_MS) console.log(`[EVENTS] Event index rebuilt in slices over ${buildMs} ms (${index.size} events)`);
+        this.setEventIndex(inputs, index);
+    }
+
+    setEventIndex(inputs, index) {
+        this.eventIndex = index;
+        this.eventIndexFor = inputs.channels;
+        this.eventIndexEpg = inputs.epgData;
+        this.eventIndexSchedule = inputs.scheduleVersion;
+        this.eventIndexTv = inputs.tvVersion;
+        this.eventIndexAt = inputs.now;
         // Live scores are applied again to the new index on the next read.
         this.eventIndexActivity = null;
     }
