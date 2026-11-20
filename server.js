@@ -24,6 +24,8 @@ const { PoolMetrics } = require("./xtream/metrics");
 const { getSchedule } = require("./espnSchedule");
 const { getTvSchedule } = require("./tvSchedule");
 const fs = require("fs");
+const v8 = require("v8");
+const { PerformanceObserver } = require("perf_hooks");
 const LRUCache = require("./lruCache");
 
 const DEBUG = (process.env.DEBUG_MODE || "").toLowerCase() === "true";
@@ -599,14 +601,24 @@ app.use((error, req, res, next) => {
     res.status(500).json({ error: "Internal server error" });
 });
 
-// Every request waits while one step blocks the event loop, so a stall over half a second is logged. The [EVENTS],
-// [XTREAM] and [POOL] timing lines just before it say which step it was.
+// Every request waits while one step blocks the event loop, so a stall over half a second is logged, with how much of
+// it was garbage collection and how full the heap is. The [EVENTS], [XTREAM] and [POOL] timing lines just before it
+// say which step it was when it wasn't GC.
 const STALL_CHECK_MS = 1000;
 const STALL_LOG_MS = 500;
 let stallTick = Date.now();
+let gcMsSinceTick = 0;
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) gcMsSinceTick += entry.duration;
+}).observe({ entryTypes: ["gc"] });
 setInterval(() => {
   const lag = Date.now() - stallTick - STALL_CHECK_MS;
-  if (lag > STALL_LOG_MS) console.warn(`[POOL] Event loop blocked for ${lag} ms`);
+  if (lag > STALL_LOG_MS) {
+    const heap = v8.getHeapStatistics();
+    const mb = (bytes) => Math.round(bytes / 1048576);
+    console.warn(`[POOL] Event loop blocked for ${lag} ms (GC ${Math.round(gcMsSinceTick)} ms, heap ${mb(heap.used_heap_size)} of ${mb(heap.heap_size_limit)} MB)`);
+  }
+  gcMsSinceTick = 0;
   stallTick = Date.now();
 }, STALL_CHECK_MS).unref();
 

@@ -387,7 +387,7 @@ The page shows no logins or URLs.
 
 The key is the only thing protecting your provider logins, so treat that link like a password. A wrong key gets a 404. The pool has its own addon ID, so it can be installed next to a regular install. It has no Configure page: edit `providers.json` and run `docker compose restart iptv` instead. `providers.json` is listed in `.gitignore` and `.dockerignore`, so it can't end up in the repo or the image.
 
-**Memory:** a provider with about 8,000 live channels and a guide adds roughly 20-25 MB, and merging adds about 5 MB per 10,000 channels. Providers with large movie and series libraries add more.
+**Memory:** a pool of 15 live-only providers (about 295,000 streams, 160,000 channels and their guides) keeps 1.4-1.8 GB on the heap, and providers with large movie and series libraries add more. `npm start` raises Node's heap limit to 4 GB: at Node's default of about 2 GB, a pool that size spends 1-2 s at a time in garbage collection, and every request waits. The `[POOL] Event loop blocked` line shows how much of a stall was garbage collection and how full the heap was, and the `[POOL] Merged` line shows the heap after each merge.
 
 ### Xtream login for IPTV apps
 

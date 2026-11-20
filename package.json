@@ -4,7 +4,7 @@
   "description": "IPTV provider pool serving Stremio and LiveWire",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=4096 server.js",
     "dev": "nodemon server.js",
     "test": "node --test"
   },
