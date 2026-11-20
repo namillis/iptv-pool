@@ -147,7 +147,8 @@ function loadHome(raw) {
 const HOME = loadHome(require("./home.json"));
 
 function buildView(pool, ids, countries, home = HOME, noArchive = null) {
-  const steps = viewSteps(pool, ids, countries, home, noArchive);
+  const snapshot = { channels: pool.channels, epgData: pool.epgData };
+  const steps = viewSteps(snapshot, ids, ids.assignStreams(snapshot.channels), countries, home, noArchive);
   let step = steps.next();
   while (!step.done) step = steps.next(step.value === undefined ? undefined : zlib.gzipSync(step.value));
   return step.value;
@@ -158,7 +159,10 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
  * and gzipped on zlib's own threads.
  */
 async function buildViewSliced(pool, ids, countries, home = HOME, noArchive = null, sliceMs = 25) {
-  const steps = viewSteps(pool, ids, countries, home, noArchive);
+  // The pool's channels and guide as they are now: a merge that lands while this builds replaces them.
+  const snapshot = { channels: pool.channels, epgData: pool.epgData };
+  const streamIds = await ids.assignStreamsSliced(snapshot.channels);
+  const steps = viewSteps(snapshot, ids, streamIds, countries, home, noArchive);
   let sliceStart = performance.now();
   let step = steps.next();
   while (!step.done) {
@@ -179,14 +183,11 @@ function gzipAsync(text) {
   return new Promise((resolve, reject) => zlib.gzip(text, (e, body) => (e ? reject(e) : resolve(body))));
 }
 
-// buildView's work. It yields nothing where a caller can pause, and a JSON string where it needs that string gzipped
-// back. The stream ids are assigned before the first pause, so two builds never interleave changes to them.
-function* viewSteps(pool, ids, countries, home, noArchive) {
-  const channels = pool.channels;
-  const epgData = pool.epgData;
+// buildView's work on [snapshot]'s channels and guide, with their [streamIds]. It yields nothing where a caller can
+// pause, and a JSON string where it needs that string gzipped back.
+function* viewSteps({ channels, epgData }, ids, streamIds, countries, home, noArchive) {
   const wanted = countries.length ? new Set(countries) : null;
   const curated = home && (!wanted || wanted.has(home.country)) ? home : null;
-  const streamIds = ids.assignStreams(channels);
   const homeLists = curated
     ? curated.categories.map((c) => ({ id: ids.categoryId(HOME_KEY + c.name), name: c.name, list: new Array(c.size) }))
     : [];

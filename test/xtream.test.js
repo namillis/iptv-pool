@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 const express = require("express");
-const { XtreamIds } = require("../xtream/ids");
+const { XtreamIds, stateJson } = require("../xtream/ids");
 const { createXtreamRouter, buildView, buildViewSliced, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape } = require("../xtream/api");
 
 function tile(key, name, members, extra = {}) {
@@ -57,6 +57,36 @@ test("a channel the pool reused keeps its id, and a stream that moves to a new c
   assert.deepStrictEqual([got.get(cnn), got.get(espn2), got.get(espnNova)], [1, 2, 3]);
   assert.strictEqual(ids.state.members["nova/4"], 3);
   assert.strictEqual(ids.state.members["teck/1"], 1);
+});
+
+test("sliced id assignment gives the same ids, and a one-go assignment finishes one in progress first", async () => {
+  const tiles = () => Array.from({ length: 3000 }, (_, i) => tile(`US|C${i}`, `C${i}`, [["p", String(i)], ["q", String(i)]]));
+  const whole = new XtreamIds(null);
+  const wholeIds = [...whole.assignStreams(tiles()).values()];
+  const sliced = new XtreamIds(null);
+  assert.deepStrictEqual([...(await sliced.assignStreamsSliced(tiles())).values()], wholeIds);
+  assert.deepStrictEqual(sliced.state, whole.state);
+
+  const mixed = new XtreamIds(null);
+  const first = tiles();
+  const inProgress = mixed.assignStreamsSliced(first, 0);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(mixed.running && !mixed.running.finished, "the sliced run is still going");
+  const second = [...first.slice(1), tile("US|NEW", "New", [["p", "new"]])];
+  const secondIds = mixed.assignStreams(second);
+  assert.deepStrictEqual([...(await inProgress).values()], wholeIds, "the sliced run was finished, not dropped");
+  assert.strictEqual(secondIds.get(second.at(-1)), 3001);
+  assert.strictEqual(secondIds.get(second[0]), 2);
+});
+
+test("the sliced save writes the same JSON as JSON.stringify", () => {
+  const ids = new XtreamIds(null);
+  ids.assignStreams(Array.from({ length: 5000 }, (_, i) => tile(`US|"C${i}"`, `C${i}`, [["p", `${i}\\x`]])));
+  ids.categoryId("US| NEWS");
+  let step;
+  const steps = stateJson(ids.state);
+  while (!(step = steps.next()).done);
+  assert.strictEqual(step.value, JSON.stringify(ids.state));
 });
 
 test("a renamed key keeps its number through a shared member", () => {
