@@ -19,6 +19,7 @@ const { sitePassword, sitePasswordEnabled } = require("./siteAuth");
 const { fetchAccountInfo } = require("./src/js/providers/xtreamProvider");
 const { createPoolAddon } = require("./providerPool");
 const { createXtreamRouter } = require("./xtream/api");
+const { RelayClient } = require("./xtream/relayClient");
 const { PoolMetrics } = require("./xtream/metrics");
 const { getSchedule } = require("./espnSchedule");
 const { getTvSchedule } = require("./tvSchedule");
@@ -355,12 +356,16 @@ if (XTREAM_USERS_FILE && fs.existsSync(XTREAM_USERS_FILE)) {
   try {
     const dataDir = process.env.XTREAM_DATA_DIR || path.join(__dirname, "xtream-data");
     poolMetrics = new PoolMetrics(path.join(dataDir, "metrics"));
+    // RELAY_PORT turns on the stream relay (xtream/relay.js) for the logins in RELAY_USERS, or all with "*".
+    const relay = process.env.RELAY_PORT ? new RelayClient({ port: Number(process.env.RELAY_PORT), users: process.env.RELAY_USERS || "*" }).start() : null;
+    if (relay) console.log(`[XTREAM] Stream relay on port ${process.env.RELAY_PORT} for ${process.env.RELAY_USERS || "all logins"}`);
     const router = createXtreamRouter({
       usersFile: XTREAM_USERS_FILE,
       idsFile: path.join(dataDir, "xtream-ids.json"),
       archiveFile: path.join(dataDir, "xtream-archive.json"),
       metrics: poolMetrics,
       getPool: poolInterface,
+      relay,
     });
     // Account checks run on a timer, not only during playback, so an account that fills up while nobody watches shows.
     setInterval(() => router.recordAccounts().catch((e) => console.error("[METRICS] Account check failed:", e.message)), ACCOUNT_METRICS_MS).unref();

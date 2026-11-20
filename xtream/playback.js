@@ -51,8 +51,10 @@ function convertStart(start, zone) {
 }
 
 class Playback {
-  constructor({ now = Date.now } = {}) {
+  /** [held] counts provider connections the stream relay holds, which take account slots like leases do. */
+  constructor({ now = Date.now, held = () => 0 } = {}) {
     this.now = now;
+    this.held = held;
     this.accounts = new Map();
     this.failed = new Map();
   }
@@ -84,8 +86,9 @@ class Playback {
     const a = status && status.get(pid);
     const max = a && !a.error ? Number(a.maxConnections) : 0;
     if (!max) return false;
-    let all = 0;
-    let ours = 0;
+    const relayed = this.held(pid);
+    let all = relayed;
+    let ours = relayed;
     for (const acct of this.accounts.values())
       for (const l of acct.leases)
         if (l.pid === pid) {

@@ -6,6 +6,7 @@ const path = require("path");
 const express = require("express");
 const { Playback, memberUrl, convertStart } = require("../xtream/playback");
 const { createXtreamRouter } = require("../xtream/api");
+const { SourceRecord } = require("../xtream/relayClient");
 
 function member(pid, src, base = `http://${pid}.example`) {
   return { _pid: pid, _src: `iptv_live_${src}`, url: `${base}/live/${pid}user/${pid}pass/${src}.m3u8` };
@@ -171,13 +172,13 @@ function fakePool() {
   return pool;
 }
 
-async function start(t, { fetchImpl, now, archiveFile } = {}) {
+async function start(t, { fetchImpl, now, archiveFile, relay = null } = {}) {
   const dir = fs.mkdtempSync(path.join(process.env.KIROCREW_SCRATCH || os.tmpdir(), "xtream-play-"));
   const usersFile = path.join(dir, "users.json");
   fs.writeFileSync(usersFile, JSON.stringify({ users: [{ username: "tv1", password: "fakepassword123" }] }));
   const pool = fakePool();
   const app = express();
-  const router = createXtreamRouter({ usersFile, idsFile: null, archiveFile, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now });
+  const router = createXtreamRouter({ usersFile, idsFile: null, archiveFile, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} }, fetchImpl, now, relay });
   app.use(router);
   const server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
@@ -455,4 +456,46 @@ test("pool_sources and source= over HTTP", async (t) => {
   r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0&source=../../etc`);
   assert.strictEqual(r.status, 302, "a malformed source is ignored, not an error");
   assert.deepStrictEqual(await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=999`)).json(), { sources: [] });
+});
+
+test("with the relay on, live TS goes to the relay with the channel's streams best first, and HLS still redirects", async (t) => {
+  const relay = {
+    record: new SourceRecord(),
+    opened: [],
+    enabledFor: (u) => u === "tv1",
+    held: () => 0,
+    open(session) {
+      this.opened.push(session);
+      return "ab".repeat(16);
+    },
+  };
+  const { base, q, id, get } = await start(t, { relay });
+  const espn = id("ESPN");
+  let r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0`);
+  assert.strictEqual(r.status, 302);
+  assert.strictEqual(r.headers.get("location"), `${base}/relay/${"ab".repeat(16)}.ts`);
+  const s = relay.opened[0];
+  assert.deepStrictEqual(s.candidates.map((c) => [c.pid, c.url]), [
+    ["teck", "http://teck.example/live/teckuser/teckpass/1.ts"],
+    ["nova", "http://nova.example/live/novauser/novapass/2.ts"],
+  ]);
+  assert.strictEqual(s.user, "tv1");
+  assert.strictEqual(s.streamId, espn);
+  assert.strictEqual(s.picked, false);
+
+  relay.record.record({ key: "teck/iptv_live_1", pid: "teck", ok: false, why: "stalled" });
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=1`);
+  assert.deepStrictEqual(relay.opened[1].candidates.map((c) => c.pid), ["nova", "teck"], "a stream that just failed goes last");
+
+  r = await get(`/live/tv1/fakepassword123/${espn}.ts?try=0&source=teck.1`);
+  assert.deepStrictEqual(relay.opened[2].candidates.map((c) => c.pid), ["teck", "nova"], "a picked source goes first");
+  assert.strictEqual(relay.opened[2].picked, true);
+
+  r = await get(`/live/tv1/fakepassword123/${espn}.m3u8`);
+  assert.strictEqual(r.headers.get("location"), "http://teck.example/live/teckuser/teckpass/1.m3u8");
+  assert.strictEqual(relay.opened.length, 3);
+
+  relay.record.record({ key: "nova/iptv_live_2", pid: "nova", ok: true, started: true, user: "tv1", streamId: espn });
+  const body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
+  assert.deepStrictEqual(body.sources.map((x) => [x.source, x.current, x.failed]), [["nova.2", true, false], ["teck.1", false, true]]);
 });

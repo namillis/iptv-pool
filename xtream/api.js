@@ -6,7 +6,7 @@ const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../site
 const { XtreamIds } = require("./ids");
 const { buildEvents, LIVE_SPORTS, POPULAR_TV } = require("./events");
 const { categoryFor, categoryRank } = require("./categories");
-const { Playback, memberUrl, convertStart, memberKey } = require("./playback");
+const { Playback, memberUrl, convertStart, memberKey, sourceKey } = require("./playback");
 const { ArchiveMemory } = require("./archive");
 const LRUCache = require("../lruCache");
 
@@ -34,6 +34,8 @@ const ARCHIVE_REBUILD_MS = 60 * 1000;
 const LIVE_FILE_RE = /^(\d{1,10})\.(ts|m3u8)$/;
 const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
+// With the relay failing over by itself, the app's source list only needs the best few.
+const RELAY_SOURCES_SHOWN = 3;
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
 const POPULAR_TV_KEY = "\u0000POPULAR TV";
@@ -357,13 +359,13 @@ function sendGzip(req, res, body, type) {
 }
 
 function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = null, getPool, log = console, fetchImpl = require("node-fetch"), now = Date.now,
-  viewRebuildDelayMs = VIEW_REBUILD_DELAY_MS, viewRebuildGapMs = VIEW_REBUILD_GAP_MS }) {
+  viewRebuildDelayMs = VIEW_REBUILD_DELAY_MS, viewRebuildGapMs = VIEW_REBUILD_GAP_MS, relay = null }) {
   const users = new Map(loadUsers(usersFile).map((u) => [u.username, u]));
   const ids = new XtreamIds(idsFile, { log });
   const archives = new ArchiveMemory(archiveFile, { now, log });
   const views = new Map();
   const pendingViews = new Map();
-  const playback = new Playback({ now });
+  const playback = new Playback({ now, held: (pid) => (relay ? relay.held(pid) : 0) });
   const rates = new Map();
   const tables = new LRUCache({ max: 300, ttl: TABLE_TTL_MS });
   let tablesInFlight = 0;
@@ -739,6 +741,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
       const tile = view.byStreamId.get(streamId) || liveFor(pool, view, user).byStreamId.get(streamId);
       if (!tile) return res.json({ sources: [] });
       const nameOf = (pid) => pool.childById.get(pid)?.poolName || pid;
+      if (relay && relay.enabledFor(user.username)) return res.json({ sources: relaySources(user, streamId, tile, nameOf, await accountStatus(pool)) });
       return res.json({ sources: playback.sources(user.username, streamId, tile, nameOf) });
     }
     if (action === "get_simple_data_table") {
@@ -781,6 +784,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     let status = await accountStatus(pool);
     if (playback.firstChoiceFull(user, streamId, tile, status)) status = await accountStatus(pool, { fresh: true });
     const signal = playbackSignal(req.query);
+    if (ext === "ts" && relay && relay.enabledFor(user.username)) return relayLive(req, res, user, streamId, tile, status, signal);
     const pick = playback.live(user, streamId, tile, ext, status, signal);
     const url = pick && memberUrl(pick.member, ext);
     if (!url) return res.status(404).json({ error: "Not found" });
@@ -788,6 +792,54 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     if (metrics) metrics.play({ user: user.username, streamId, channel: tile.name, pid: pick.member._pid, reason: pick.reason, from: pick.from, attempt: signal ? signal.attempt : null });
     return redirect(res, url);
   });
+
+  /** A channel's streams in the order the relay tries them: see SourceRecord.order. */
+  function relayOrder(tile, status) {
+    return relay.record.order(tile._members, memberKey, (pid) => playback.isFull(pid, status, null));
+  }
+
+  /**
+   * Plays a live channel through the stream relay: registers the channel's streams, best first, and sends the
+   * TV to the relay, which races them and fails over mid-show. A picked source goes first and isn't shared.
+   */
+  function relayLive(req, res, user, streamId, tile, status, signal) {
+    let members = relayOrder(tile, status);
+    const picked = signal && signal.source ? members.find((m) => sourceKey(m) === signal.source) : null;
+    if (picked) members = [picked, ...members.filter((m) => m !== picked)];
+    const candidates = [];
+    for (const m of members) {
+      const url = memberUrl(m, "ts");
+      if (url) candidates.push({ key: memberKey(m), pid: m._pid, url, redirectOnly: relay.record.redirectOnly(m._pid) });
+    }
+    if (!candidates.length) return res.status(404).json({ error: "Not found" });
+    const id = relay.open({
+      user: user.username, userMax: user.maxConnections, streamId, channel: tile.name, channelKey: tile._key, candidates, picked: !!picked,
+    });
+    const reason = picked ? "relay-picked" : signal && signal.attempt > 1 ? "relay-retry" : "relay";
+    log.log(`[XTREAM] ${user.username} live ${streamId} "${tile.name}" -> relay (${candidates.slice(0, 3).map((c) => c.pid).join(", ")}${candidates.length > 3 ? ", ..." : ""}; ${reason})`);
+    if (metrics) metrics.play({ user: user.username, streamId, channel: tile.name, pid: candidates[0].pid, reason, from: null, attempt: signal ? signal.attempt : null });
+    const proto = (req.get("x-forwarded-proto") || req.protocol).split(",")[0];
+    return redirect(res, `${proto}://${req.get("host")}/relay/${id}.ts`);
+  }
+
+  /** The best few of a channel's streams, in relay order, marking the one the login last played. */
+  function relaySources(user, streamId, tile, nameOf, status) {
+    const current = relay.record.currentFor(user.username, streamId);
+    return relayOrder(tile, status)
+      .slice(0, RELAY_SOURCES_SHOWN)
+      .map((m) => {
+        const label = m._quality ? m._quality.label : "";
+        return {
+          source: sourceKey(m),
+          provider: nameOf(m._pid),
+          name: String(m.name || "").trim(),
+          quality: label.replace(/\s*backup$/i, "").replace(/^Backup$/, ""),
+          backup: /backup/i.test(label),
+          current: current === memberKey(m),
+          failed: relay.record.recentlyFailed(memberKey(m)),
+        };
+      });
+  }
 
   async function archive(req, res, creds, streamId, duration, start, form, ext) {
     if (!DURATION_RE.test(String(duration))) return res.status(400).json({ error: "Bad duration" });
