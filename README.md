@@ -321,6 +321,7 @@ If you pay for more than one provider, the server can load all of them and serve
 - Movies and series are not merged yet. Each provider's copy is listed separately and labeled with its provider.
 - **Live Now** and **Today** are built from the merged channels, so a game is one tile and its streams cover every provider that has a matching channel, up to 15. Each channel is listed once before any provider's backup copy.
 - Each provider is fetched, cached and refreshed on its own. If one is down, the others keep working and the failed one is retried every 10 minutes.
+- Merging the providers into one channel list runs in a worker thread, so a refresh doesn't hold up requests. Refreshes close together share one merge, at most one a minute.
 
 ### Set it up
 

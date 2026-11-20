@@ -35,6 +35,7 @@ test("separator rows and numbered slots keep no country, so they never join a re
 function pool(providers) {
   const p = new ProviderPool({
     settings: {},
+    inlineMerge: true,
     providers: providers.map(([id, country]) => ({ id, name: id, country, config: { provider: "direct", m3uUrl: "http://example.invalid/list.m3u" } })),
   }, null);
   return p;
@@ -42,25 +43,25 @@ function pool(providers) {
 
 const ch = (id, name, category) => ({ id, name, type: "tv", category, attributes: { "group-title": category } });
 
-test("pool merges an unprefixed channel into the prefixed one from its category's country", () => {
+test("pool merges an unprefixed channel into the prefixed one from its category's country", async () => {
   const p = pool([["a", ""], ["b", ""]]);
   p.childById.get("a").channels = [ch("1", "UK: Sky Sports Main Event", "UK SPORTS"), ch("2", "US: ESPN", "US SPORTS")];
   p.childById.get("b").channels = [ch("9", "Sky Sports Main Event FHD", "UK-Restream"), ch("8", "ESPN HD", "USA | Sports"), ch("7", "Rai 1", "Italy")];
-  p.merge();
+  await p.merge();
   const byKey = new Map(p.channels.map((t) => [t._key, t]));
   assert.deepStrictEqual([...byKey.keys()].sort(), ["UK|SKYSPORTSMAINEVENT", "US|ESPN", "|RAI1"]);
   assert.deepStrictEqual(byKey.get("UK|SKYSPORTSMAINEVENT")._members.map((m) => m._pid).sort(), ["a", "b"]);
   assert.deepStrictEqual(byKey.get("US|ESPN")._members.map((m) => m._pid).sort(), ["a", "b"]);
 });
 
-test("the provider country is still the fallback when the category names no country", () => {
+test("the provider country is still the fallback when the category names no country", async () => {
   const p = pool([["org", "US"]]);
   p.childById.get("org").channels = [ch("1", "CNN", "News"), ch("2", "BBC One", "UK | General")];
-  p.merge();
+  await p.merge();
   assert.deepStrictEqual(p.channels.map((t) => t._key).sort(), ["UK|BBCONE", "US|CNN"]);
 });
 
-test("a guide id one provider put on unrelated channels is dropped from the ones it doesn't name", () => {
+test("a guide id one provider put on unrelated channels is dropped from the ones it doesn't name", async () => {
   const tvg = (id, name, category, tvgId) => ({ ...ch(id, name, category), attributes: { "group-title": category, "tvg-id": tvgId } });
   const p = pool([["polar", "US"], ["nova", "US"]]);
   p.childById.get("polar").channels = [
@@ -79,7 +80,7 @@ test("a guide id one provider put on unrelated channels is dropped from the ones
   const listing = [{ s: 1, e: 2, t: "Programme" }];
   p.childById.get("polar").epgData = { "3tvktvkphoenixaz.us": listing, "svt1.se": listing, "espn.us": listing, "cbcnewsnetwork.ca": listing, "skybundesliga5.de": listing };
   p.childById.get("nova").epgData = { "horrorbyalter.us": [{ s: 1, e: 2, t: "Night of the Living Dead" }] };
-  p.merge();
+  await p.merge();
   const epg = new Map(p.channels.map((t) => [t._key, t._epg]));
   assert.strictEqual(epg.get("US|HORRORBYALTER"), "nova/horrorbyalter.us");
   assert.strictEqual(epg.get("US|LAFFMORE"), null);
@@ -94,7 +95,7 @@ test("a guide id one provider put on unrelated channels is dropped from the ones
   assert.ok(bundesliga.length >= 1 && bundesliga.every((t) => t._epg === "polar/skybundesliga5.de"));
 });
 
-test("a guide id one provider put on thousands of channels is sorted out quickly", () => {
+test("a guide id one provider put on thousands of channels is sorted out quickly", async () => {
   const tvg = (id, name, tvgId) => ({ ...ch(id, name, "USA"), attributes: { "group-title": "USA", "tvg-id": tvgId } });
   const p = pool([["prem", "US"]]);
   const words = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet"];
@@ -102,7 +103,7 @@ test("a guide id one provider put on thousands of channels is sorted out quickly
     tvg(String(i), `US: ${words[i % 10]} ${words[Math.floor(i / 10) % 10]} ${words[Math.floor(i / 100) % 10]} Z${i}`, "none.us"));
   p.childById.get("prem").epgData = { "none.us": [{ s: 1, e: 2, t: "Programme" }] };
   const start = Date.now();
-  p.merge();
+  await p.merge();
   assert.ok(Date.now() - start < 3000, `merge took ${Date.now() - start} ms`);
   // Every name shares a word with another, so they form one group that is most of them, and keep the id.
   assert.ok(p.channels.every((t) => t._epg === "prem/none.us"));
@@ -111,16 +112,55 @@ test("a guide id one provider put on thousands of channels is sorted out quickly
 test("refreshes close together share one merge", async () => {
   const p = pool([["a", "US"], ["b", "US"]]);
   p.childById.get("a").channels = [ch("1", "US: ESPN", "US")];
-  p.merge();
+  await p.merge();
   let merges = 0;
   const merge = p.merge.bind(p);
-  p.merge = () => { merges++; merge(); };
+  p.merge = () => { merges++; return merge(); };
   p.requestMerge();
   p.requestMerge();
   assert.strictEqual(merges, 0, "a merge just ran, so the next one waits");
   assert.ok(p.mergeTimer);
   p.mergedAt -= 61 * 1000;
-  p.requestMerge();
+  await p.requestMerge();
   assert.strictEqual(merges, 1);
   assert.strictEqual(p.mergeTimer, null, "the waiting merge was the one that ran");
+});
+
+test("the merge worker gives the same channels as merging in-process, and unchanged channels are reused", async () => {
+  const build = async (inline) => {
+    const p = new ProviderPool({ settings: {}, inlineMerge: inline, providers: [["a", "US"], ["b", ""]].map(([id, country]) => ({ id, name: id, country, config: { provider: "direct", m3uUrl: "http://example.invalid/list.m3u" } })) }, null);
+    p.childById.get("a").channels = [ch("1", "UK: Sky Sports Main Event", "UK SPORTS"), ch("2", "US: ESPN", "US SPORTS"), ch("3", "US: ESPN FHD", "US SPORTS")];
+    p.childById.get("b").channels = [ch("9", "Sky Sports Main Event FHD", "UK-Restream"), ch("8", "ESPN HD", "USA | Sports"), ch("7", "Rai 1", "Italy")];
+    await p.merge();
+    return p;
+  };
+  const shape = (p) => p.channels.map((t) => [t.id, t._key, t.name, t._members.map((m) => m.id), t._primary.length, t._epg]);
+  const worker = await build(false);
+  const inline = await build(true);
+  try {
+    assert.ok(worker.planner.constructor.name === "MergeWorker", "the pool used the worker");
+    assert.deepStrictEqual(shape(worker), shape(inline));
+    worker.childById.get("b").channels = [...worker.childById.get("b").channels, ch("6", "Rai 2", "Italy")];
+    const sky = worker.channels.find((t) => t._key === "UK|SKYSPORTSMAINEVENT");
+    await worker.merge();
+    assert.notStrictEqual(worker.channels.find((t) => t._key === "UK|SKYSPORTSMAINEVENT"), sky, "a channel with a refreshed provider's stream is rebuilt");
+    assert.ok(worker.channels.some((t) => t._key === "|RAI2"));
+    const before = worker.channels.find((t) => t._key === "UK|SKYSPORTSMAINEVENT");
+    await worker.merge();
+    assert.strictEqual(worker.channels.find((t) => t._key === "UK|SKYSPORTSMAINEVENT"), before, "an unchanged channel is the same object");
+  } finally {
+    worker.planner.stop();
+  }
+});
+
+test("a merge asked for during another runs after it, not alongside", async () => {
+  const p = pool([["a", "US"]]);
+  p.childById.get("a").channels = [ch("1", "US: ESPN", "US")];
+  const first = p.merge();
+  p.childById.get("a").channels = [ch("1", "US: ESPN", "US"), ch("2", "US: CNN", "US")];
+  const second = p.merge();
+  assert.strictEqual(first, second, "the second call joins the running merge");
+  await first;
+  while (p.merging) await p.merging;
+  assert.deepStrictEqual(p.channels.map((t) => t._key).sort(), ["US|CNN", "US|ESPN"]);
 });

@@ -1,6 +1,8 @@
 const fs = require('fs');
 const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, markUsed, EVENT_STREAMS_MAX } = require('./addon');
-const { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey } = require('./channelMerge');
+const { categoryCountry, displayName, tileId } = require('./channelMerge');
+const { TILE_HEADER } = require('./mergePlan');
+const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 
 const SEP = '~';
@@ -9,84 +11,14 @@ const MAX_PROVIDERS = 20;
 const POOL_CONCURRENCY = 2;
 const RETRY_MS = 10 * 60 * 1000;
 const MERGE_GAP_MS = 60 * 1000;
+// The main thread's part of a merge gives way to requests after this many streams or channels.
+const MERGE_SLICE = 2000;
+const yieldToLoop = () => new Promise(setImmediate);
 const POOL_ADDON_ID = 'org.stremio.m3u-epg-addon.pool';
 const POOL_ADDON_NAME = 'M3U/EPG TV Pool';
 const COUNTRY_RE = /^[A-Z]{2,3}$/;
 const TILE_PREFIX = 'iptv_ch_';
 const ACCOUNT_CACHE_MS = 5 * 60 * 1000;
-
-const GENERIC_WORDS = new Set(['HD', 'FHD', 'UHD', 'SD', '4K', '8K', 'HDR', 'HEVC', 'RAW', 'TV', 'THE', 'AND', 'OF', 'CHANNEL', 'NETWORK', 'VIP',
-    'BY', 'LIVE', 'SPORT', 'SPORTS', 'NEWS', 'CH', 'MULTI', 'USA', 'US', 'UK', 'CA', 'EN', 'FR', 'DE', 'ES']);
-
-const compactName = (s) => String(s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// The words that tell one channel from another, without its [prefix]: "GR - Horror by Alter" -> HORROR, ALTER.
-const nameWords = (name, prefix) => new Set(String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase().split(/[^A-Z0-9]+/)
-    .filter(w => w.length >= 2 && w !== prefix && !/^\d+$/.test(w) && !GENERIC_WORDS.has(w)));
-
-// "polar/3tvktvkphoenixaz.us" -> "3tvktvkphoenixaz": the channel part of a member's guide key, without the provider or country.
-const guideStem = (guideKey) => compactName(guideKey.slice(guideKey.indexOf('/') + 1).split('.')[0]);
-
-// Which of [names] (tile key -> channel name) a shared guide id [guide] really belongs to. A channel whose name carries the
-// id keeps it, along with the channels whose names share a word with it ("CA CBC News Toronto" on cbcnewsnetwork.ca).
-// With no such channel, the id stays only on a set of like-named channels that makes up most of them ("Sky Sport
-// Bundesliga 5", "... 6"); unrelated channels sharing it (Horror by ALTER, Laff More, Ebony TV) all lose it.
-function guideOwners(guide, names) {
-    const stem = guideStem(guide);
-    const keys = [...names.keys()];
-    // Channels are linked when their names share a word, and a chain of links joins them. The groups are found by
-    // joining each channel to the first one with each of its words, so a guide id one provider put on thousands of
-    // channels costs a pass over their words, not a comparison of every pair.
-    const parent = new Map(keys.map(k => [k, k]));
-    const find = (k) => {
-        while (parent.get(k) !== k) {
-            parent.set(k, parent.get(parent.get(k)));
-            k = parent.get(k);
-        }
-        return k;
-    };
-    const firstWith = new Map();
-    for (const k of keys) {
-        for (const w of nameWords(names.get(k), k.slice(0, k.indexOf('|')))) {
-            const other = firstWith.get(w);
-            if (other === undefined) firstWith.set(w, k);
-            else parent.set(find(k), find(other));
-        }
-    }
-    const groups = new Map();
-    for (const k of keys) {
-        const root = find(k);
-        let group = groups.get(root);
-        if (!group) groups.set(root, group = new Set());
-        group.add(k);
-    }
-    const carries = (k) => compactName(k.slice(k.indexOf('|') + 1)).includes(stem) || compactName(names.get(k)).includes(stem);
-    const anchors = stem.length >= 2 ? keys.filter(carries) : [];
-    if (anchors.length) return new Set(anchors.flatMap(k => [...groups.get(find(k))]));
-    let largest = new Set();
-    for (const group of groups.values()) if (group.size > largest.size) largest = group;
-    return largest.size * 2 > keys.length ? largest : new Set();
-}
-
-// Providers sometimes give unrelated channels one guide id: Polar tags Horror by ALTER, Laff More and Ebony TV with
-// Phoenix's KTVK guide, so a Suns game on KTVK looked like it aired on all of them. A guide id on one channel name is
-// left alone; a shared one is kept only by the channels [guideOwners] picks.
-function misfiledGuides(members) {
-    const namesByGuide = new Map();
-    for (const m of members) {
-        if (!m._epgKey || !m._key) continue;
-        let names = namesByGuide.get(m._epgKey);
-        if (!names) namesByGuide.set(m._epgKey, names = new Map());
-        if (!names.has(m._key)) names.set(m._key, m.name);
-    }
-    const misfiled = new Set();
-    for (const [guide, names] of namesByGuide) {
-        if (names.size < 2) continue;
-        const owners = guideOwners(guide, names);
-        for (const key of names.keys()) if (!owners.has(key)) misfiled.add(`${guide}\n${key}`);
-    }
-    return misfiled;
-}
 
 function loadPoolConfig(file) {
     let raw;
@@ -144,12 +76,15 @@ class ProviderPool extends M3UEPGAddon {
         this.taggedLists = new Map();
         this.tileById = new Map();
         this.tileCache = new Map();
+        this.streamLists = new Map();
+        // The merge plans in a worker thread unless [inlineMerge] (tests) or the worker has failed.
+        this.planner = poolConfig.inlineMerge ? new InlinePlanner() : null;
         this.accounts = null;
     }
 
     async loadFromCache() {
         await Promise.all(this.children.map(c => c.loadFromCache()));
-        this.merge();
+        await this.merge();
     }
 
     async saveToCache() { }
@@ -184,7 +119,8 @@ class ProviderPool extends M3UEPGAddon {
                 } else {
                     child.retryAt = 0;
                 }
-                this.requestMerge();
+                // The first merge is waited for, so a pool starting with no cache has channels once this returns.
+                await this.requestMerge();
             }
         };
         await Promise.all(Array.from({ length: Math.min(POOL_CONCURRENCY, due.length) }, worker));
@@ -209,63 +145,153 @@ class ProviderPool extends M3UEPGAddon {
         if (!lists) this.taggedLists.set(child, lists = {});
         if (lists[kind]?.src !== src) {
             const pid = child.poolId;
-            const countryOf = new Map();
-            const defaultCountry = (category) => {
-                let c = countryOf.get(category);
-                if (c === undefined) countryOf.set(category, c = categoryCountry(category) || child.poolCountry);
-                return c;
-            };
-            lists[kind] = {
-                src,
-                items: src.map(i => {
-                    const item = { ...i, id: i.id + SEP + pid, _pid: pid, _src: i.id };
-                    if (kind === 'channels') {
-                        item._key = channelKey(i.name, defaultCountry(this.channelGroup(i)));
-                        item._quality = streamQuality(i.name);
-                        const epg = M3UEPGAddon.prototype.epgIdOf.call(this, i);
-                        item._epgKey = epg ? `${pid}/${epg}` : null;
-                    }
-                    return item;
-                })
-            };
+            lists[kind] = { src, items: src.map(i => ({ ...i, id: i.id + SEP + pid, _pid: pid, _src: i.id })) };
         }
         return lists[kind].items;
     }
 
+    plannerFor() {
+        if (!this.planner) {
+            try {
+                this.planner = new MergeWorker();
+            } catch (e) {
+                console.error(`[POOL] Merge worker didn't start (${e.message}); merging on the main thread`);
+                this.planner = new InlinePlanner();
+            }
+        }
+        return this.planner;
+    }
+
+    /**
+     * A provider's live streams as pool members, each with its channel key, quality and guide key. The naming runs
+     * in the planner, which also learns which guide ids have listings. An unchanged list keeps its member objects,
+     * so its channels are reused; it's sent again only when its guide changed.
+     */
+    async streamsOf(child, planner) {
+        const src = child.channels || [];
+        const prev = this.streamLists.get(child);
+        if (prev && prev.src === src && prev.epg === child.epgData && prev.planner === planner) return prev.items;
+        const pid = child.poolId;
+        const epg = child.epgData || {};
+        const guides = [];
+        for (const k in epg) if (epg[k]?.length) guides.push(k);
+        const epgIds = src.map(i => M3UEPGAddon.prototype.epgIdOf.call(this, i));
+        const { keys, qLabels, qualities } = await planner.setProvider({
+            pid,
+            country: child.poolCountry,
+            names: src.map(i => i.name),
+            groups: src.map(i => this.channelGroup(i)),
+            epgIds,
+            catchup: Uint8Array.from(src, i => (child.catchupEnabledFor(i) ? 1 : 0)),
+            guides,
+        });
+        if (prev && prev.src === src && prev.planner === planner) {
+            this.streamLists.set(child, { ...prev, epg: child.epgData });
+            return prev.items;
+        }
+        const quality = new Map(Object.entries(qualities).map(([label, rank]) => [label, Object.freeze({ label, rank })]));
+        const items = new Array(src.length);
+        for (let n = 0; n < src.length; n++) {
+            const i = src[n];
+            items[n] = {
+                ...i, id: i.id + SEP + pid, _pid: pid, _src: i.id, _key: keys[n], _quality: quality.get(qLabels[n]),
+                _epgKey: epgIds[n] ? `${pid}/${epgIds[n]}` : null,
+            };
+            if (n % MERGE_SLICE === MERGE_SLICE - 1) await yieldToLoop();
+        }
+        this.streamLists.set(child, { src, epg: child.epgData, planner, items });
+        return items;
+    }
+
+    /**
+     * Merges the providers' streams into channels. The planner (a worker thread) names, groups and orders the
+     * streams; this thread builds the channels from its plan in slices that let requests through, and switches to
+     * the new channels at once. Merges never overlap: one asked for during another runs after it.
+     */
     merge() {
         clearTimeout(this.mergeTimer);
         this.mergeTimer = null;
+        if (this.merging) {
+            this.mergeAgain = true;
+            return this.merging;
+        }
+        this.merging = this.runMerge()
+            .catch(async (e) => {
+                if (this.planner instanceof InlinePlanner) throw e;
+                console.error(`[POOL] Merge worker failed (${e.message}); merging on the main thread`);
+                if (this.planner) this.planner.stop();
+                this.planner = new InlinePlanner();
+                return this.runMerge();
+            })
+            .catch(e => console.error('[POOL] Merge failed:', e))
+            .finally(() => {
+                this.merging = null;
+                if (this.mergeAgain) {
+                    this.mergeAgain = false;
+                    this.merge();
+                }
+            });
+        return this.merging;
+    }
+
+    async runMerge() {
         const started = Date.now();
+        const planner = this.plannerFor();
+        const lists = [];
+        for (const child of this.children) lists.push(await this.streamsOf(child, planner));
+        const plan = await planner.plan(this.children.map(c => c.poolId));
+        const members = [].concat(...lists);
+        if (plan.streams !== members.length) throw new Error(`plan has ${plan.streams} streams, the pool ${members.length}`);
         const epgData = {};
         let lastUpdate = 0;
         for (const child of this.children) {
             for (const k in child.epgData) epgData[`${child.poolId}/${k}`] = child.epgData[k];
             lastUpdate = Math.max(lastUpdate, child.lastUpdate || 0);
         }
-        const members = [].concat(...this.children.map(c => this.tagged(c, 'channels')));
+        const { tiles, cache, byId } = await this.buildTiles(plan, members);
         this.epgData = epgData;
-        this.channels = this.buildTiles(members);
-        this.tileById = new Map(this.channels.map(t => [t.id, t]));
+        this.channels = tiles;
+        this.tileCache = cache;
+        this.placeholderCount = plan.placeholders;
+        this.tileById = byId;
         this.memberCount = members.length;
         this.movies = [].concat(...this.children.map(c => this.tagged(c, 'movies')));
         this.series = [].concat(...this.children.map(c => this.tagged(c, 'series')));
         this.lastUpdate = lastUpdate;
         this.buildGenresInManifest();
         this.mergedAt = Date.now();
-        if (this.channels.length) console.log(`[POOL] Merged ${this.memberCount} streams into ${this.channels.length} channels in ${this.mergedAt - started} ms`);
+        if (tiles.length) console.log(`[POOL] Merged ${members.length} streams into ${tiles.length} channels in ${this.mergedAt - started} ms`);
     }
 
-    orderMembers(members) {
-        const rank = m => this.childRank.get(m._pid);
-        const sorted = [...members].sort((a, b) => rank(a) - rank(b) || a._quality.rank - b._quality.rank);
-        const primary = [];
-        const rest = [];
-        const seen = new Set();
-        for (const m of sorted) {
-            if (seen.has(m._pid)) rest.push(m);
-            else { seen.add(m._pid); primary.push(m); }
+    /**
+     * The channels in [plan] (see mergePlan.js), and a lookup by id, reusing each channel whose streams, guide and
+     * catch-up are unchanged.
+     */
+    async buildTiles(plan, members) {
+        const { keys, layout } = plan;
+        const tiles = new Array(keys.length);
+        const cache = new Map();
+        const byId = new Map();
+        let pos = 0;
+        for (let t = 0; t < keys.length; t++) {
+            const key = keys[t];
+            const count = layout[pos];
+            const primaryCount = layout[pos + 1];
+            const guidePos = layout[pos + 2];
+            const catchupPos = layout[pos + 3];
+            pos += TILE_HEADER;
+            const ordered = new Array(count);
+            for (let i = 0; i < count; i++) ordered[i] = members[layout[pos + i]];
+            pos += count;
+            const prev = this.tileCache.get(key);
+            const reuse = prev && prev.guidePos === guidePos && prev.catchupPos === catchupPos && this.sameMembers(prev.ordered, ordered);
+            const tile = reuse ? prev.tile : this.buildTile(key, ordered, primaryCount, guidePos, catchupPos, prev && prev.tile.id);
+            cache.set(key, { ordered, guidePos, catchupPos, tile });
+            byId.set(tile.id, tile);
+            tiles[t] = tile;
+            if (t % MERGE_SLICE === MERGE_SLICE - 1) await yieldToLoop();
         }
-        return { primary, ordered: primary.concat(rest) };
+        return { tiles, cache, byId };
     }
 
     sameMembers(a, b) {
@@ -274,35 +300,14 @@ class ProviderPool extends M3UEPGAddon {
         return true;
     }
 
-    buildTiles(members) {
-        const groups = groupByKey(members, m => m._key);
-        const cache = new Map();
-        let placeholders = 0;
-        for (const m of members) if (!m._key) placeholders++;
-        const misfiled = misfiledGuides(members);
-        const tiles = groups.map(({ key, members: list }) => {
-            const dropped = list.filter(m => misfiled.has(`${m._epgKey}\n${key}`)).map(m => m._epgKey).join('\n');
-            const prev = this.tileCache.get(key);
-            const reuse = prev && prev.dropped === dropped && this.sameMembers(prev.list, list);
-            const tile = reuse ? prev.tile : this.buildTile(key, list, new Set(dropped ? dropped.split('\n') : []));
-            cache.set(key, { list, tile, dropped });
-            return tile;
-        });
-        this.tileCache = cache;
-        this.placeholderCount = placeholders;
-        return tiles;
-    }
-
-    buildTile(key, list, misfiledGuideKeys = new Set()) {
-        const { primary, ordered } = this.orderMembers(list);
+    buildTile(key, ordered, primaryCount, guidePos, catchupPos, id = null) {
+        const primary = ordered.slice(0, primaryCount);
         const rep = primary[0];
-        const trusted = m => m._epgKey && !misfiledGuideKeys.has(m._epgKey);
-        const guided = ordered.find(m => trusted(m) && this.epgData[m._epgKey]?.length);
         const logo = ordered.map(m => m.logo || m.attributes?.['tvg-logo']).find(Boolean) || null;
-        const catchup = ordered.find(m => this.childById.get(m._pid).catchupEnabledFor(m)) || null;
+        const catchup = catchupPos >= 0 ? ordered[catchupPos] : null;
         const groupNames = [...new Set(ordered.map(m => this.channelGroup(m)).filter(Boolean))];
         return {
-            id: tileId(key),
+            id: id || tileId(key),
             type: 'tv',
             name: displayName(rep.name),
             category: groupNames[0] || '',
@@ -313,7 +318,7 @@ class ProviderPool extends M3UEPGAddon {
             _members: ordered,
             _primary: primary,
             _groups: groupNames,
-            _epg: guided ? guided._epgKey : trusted(rep) ? rep._epgKey : null,
+            _epg: guidePos >= 0 ? ordered[guidePos]._epgKey : null,
             _catchup: catchup,
             _search: null
         };
