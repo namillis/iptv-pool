@@ -23,7 +23,11 @@ const KEYFRAME_WAIT_MS = 5000;
 // The next source's timestamps start one frame (1/30 s at 90 kHz) after the last source's, so the TV plays on
 // from its buffer instead of showing a frozen picture for the time the switch took.
 const SWITCH_GAP = 3000;
-const GOP_CACHE_MAX = 6 * 1024 * 1024;
+// A TV joining a channel already playing gets about this much video at once, from a picture with parameter
+// sets: players such as FFmpeg read a few seconds of a stream before they start, which a provider's opening
+// burst gives them, so a join has to as well.
+const BACKLOG_S = 8;
+const BACKLOG_MAX_BYTES = 24 * 1024 * 1024;
 // Just after a switch, audio the new source muxed earlier than its video would play twice; it's dropped instead.
 const OVERLAP_MS = 3000;
 
@@ -209,9 +213,8 @@ class TsNormalizer {
     this.dropping = new Set();
     this.format = null;
     this.formatChanged = false;
-    this.sinceKeyframe = [];
-    this.sinceKeyframeBytes = 0;
-    this.sinceKeyframeAt = null;
+    this.gops = [];
+    this.backlogBytes = 0;
     this.packetsSincePsi = 0;
     this.startSource();
   }
@@ -366,10 +369,9 @@ class TsNormalizer {
     this.gateOpen = true;
     this.openedAt = this.now();
     this.dropping.clear();
-    this.sinceKeyframe = [];
-    this.sinceKeyframeBytes = 0;
+    this.gops = [];
+    this.backlogBytes = 0;
     this.pes = null;
-    this.joinable = false;
     out.push(...this.psi());
     for (const q of held) this.emit(q, pidOf(q), out);
   }
@@ -438,35 +440,45 @@ class TsNormalizer {
   }
 
   /**
-   * Keeps the output from the start of the last picture with a parameter set, for TVs that join. The parameter
-   * set can be several packets into the picture's PES, so each PES start is marked until that's known.
+   * Keeps the last BACKLOG_S or so of output as groups of pictures, each starting at a picture with a parameter
+   * set, for TVs that join. The parameter set can be several packets into its PES, so each PES start is marked
+   * until that's known, and a new group starts there.
    */
   remember(p, pid) {
     const video = pid === this.videoPid;
-    if (video && payloadStart(p)) this.pes = { at: this.sinceKeyframe.length, tail: Buffer.alloc(0), done: false };
-    if (this.sinceKeyframeBytes + PACKET > GOP_CACHE_MAX) {
-      this.sinceKeyframe = [];
-      this.sinceKeyframeBytes = 0;
-      this.joinable = false;
-      if (this.pes) this.pes.at = 0;
+    const gop = this.gops[this.gops.length - 1];
+    if (video && payloadStart(p)) this.pes = { at: gop ? gop.packets.length : 0, tail: Buffer.alloc(0), done: false };
+    if (gop) {
+      gop.packets.push(p);
+      this.backlogBytes += PACKET;
     }
-    this.sinceKeyframe.push(p);
-    this.sinceKeyframeBytes += PACKET;
-    if (!video || !this.pes || this.pes.done) return;
-    const bytes = videoBytes(p);
-    if (hasParameterSet(this.pes.tail, bytes, this.hevc)) {
-      this.sinceKeyframe = this.sinceKeyframe.slice(this.pes.at);
-      this.sinceKeyframeBytes = this.sinceKeyframe.length * PACKET;
-      this.pes = { at: 0, tail: Buffer.alloc(0), done: true };
-      this.joinable = true;
-    } else this.pes.tail = Buffer.from(bytes.subarray(Math.max(0, bytes.length - 3)));
+    if (video && this.pes && !this.pes.done) {
+      const bytes = videoBytes(p);
+      if (hasParameterSet(this.pes.tail, bytes, this.hevc)) {
+        const moved = gop ? gop.packets.splice(this.pes.at) : [p];
+        if (!gop) this.backlogBytes += PACKET;
+        this.gops.push({ packets: moved, pcr: this.lastPcr });
+        this.pes.done = true;
+        this.trimBacklog();
+      } else this.pes.tail = Buffer.from(bytes.subarray(Math.max(0, bytes.length - 3)));
+    }
+    while (this.backlogBytes > BACKLOG_MAX_BYTES && this.gops.length > 1) this.dropOldestGop();
+  }
+
+  /** Drops the oldest group while the rest still cover BACKLOG_S. */
+  trimBacklog() {
+    while (this.gops.length > 2 && this.lastPcr !== null && this.gops[1].pcr !== null && ahead(this.lastPcr, this.gops[1].pcr) >= BACKLOG_S * 90000) this.dropOldestGop();
+  }
+
+  dropOldestGop() {
+    this.backlogBytes -= this.gops.shift().packets.length * PACKET;
   }
 
   /** What a TV joining now gets first: the program table and the output since the last keyframe. */
   joinPrefix() {
     if (!this.gateOpen || !this.outStreams) return Buffer.alloc(0);
     const [pat, pmt] = this.psiCopy();
-    return Buffer.concat([pat, pmt, ...(this.joinable ? this.sinceKeyframe : [])]);
+    return Buffer.concat([pat, pmt, ...this.gops.flatMap((g) => g.packets)]);
   }
 
   /** The program table without advancing the shared continuity counters (a joining TV starts its own count). */
