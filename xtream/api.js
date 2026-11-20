@@ -147,9 +147,46 @@ function loadHome(raw) {
 const HOME = loadHome(require("./home.json"));
 
 function buildView(pool, ids, countries, home = HOME, noArchive = null) {
+  const steps = viewSteps(pool, ids, countries, home, noArchive);
+  let step = steps.next();
+  while (!step.done) step = steps.next(step.value === undefined ? undefined : zlib.gzipSync(step.value));
+  return step.value;
+}
+
+/**
+ * The same view as buildView, built in slices of at most about [sliceMs] with other work let through in between,
+ * and gzipped on zlib's own threads.
+ */
+async function buildViewSliced(pool, ids, countries, home = HOME, noArchive = null, sliceMs = 25) {
+  const steps = viewSteps(pool, ids, countries, home, noArchive);
+  let sliceStart = performance.now();
+  let step = steps.next();
+  while (!step.done) {
+    let reply;
+    if (step.value !== undefined) {
+      reply = await gzipAsync(step.value);
+      sliceStart = performance.now();
+    } else if (performance.now() - sliceStart >= sliceMs) {
+      await new Promise((resolve) => setImmediate(resolve));
+      sliceStart = performance.now();
+    }
+    step = steps.next(reply);
+  }
+  return step.value;
+}
+
+function gzipAsync(text) {
+  return new Promise((resolve, reject) => zlib.gzip(text, (e, body) => (e ? reject(e) : resolve(body))));
+}
+
+// buildView's work. It yields nothing where a caller can pause, and a JSON string where it needs that string gzipped
+// back. The stream ids are assigned before the first pause, so two builds never interleave changes to them.
+function* viewSteps(pool, ids, countries, home, noArchive) {
+  const channels = pool.channels;
+  const epgData = pool.epgData;
   const wanted = countries.length ? new Set(countries) : null;
   const curated = home && (!wanted || wanted.has(home.country)) ? home : null;
-  const streamIds = ids.assignStreams(pool.channels);
+  const streamIds = ids.assignStreams(channels);
   const homeLists = curated
     ? curated.categories.map((c) => ({ id: ids.categoryId(HOME_KEY + c.name), name: c.name, list: new Array(c.size) }))
     : [];
@@ -162,7 +199,8 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
   const byCategory = new Map();
   const entries = [];
   const byStreamId = new Map();
-  for (const tile of pool.channels) {
+  for (const tile of channels) {
+    yield;
     const country = tileCountry(tile._key);
     if (wanted && !wanted.has(country)) continue;
     const atHome = country === homeCountry;
@@ -172,7 +210,7 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
     const merged = !slot && atHome && homeByName.get(name);
     const categoryId = slot ? homeLists[slot.category].id : merged ? merged.id : ids.categoryId(POOL_CATEGORY_KEY + name);
     const catIds = [categoryId];
-    const epgKey = tile._epg && pool.epgData[tile._epg]?.length ? tile._epg : null;
+    const epgKey = tile._epg && epgData[tile._epg]?.length ? tile._epg : null;
     const archived = !!tile._catchup && !(noArchive && noArchive.has(tile._key));
     const stream = {
       num: 0,
@@ -211,16 +249,21 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
   // Home-country categories first, then each other country's, each in the list's own order.
   pooled.sort((a, b) => a.country.localeCompare(b.country) || categoryRank(a.theme) - categoryRank(b.theme));
   ordered.push(...pooled);
-  const gz = (value) => zlib.gzipSync(JSON.stringify(value));
   const categories = ordered.map((c) => ({ category_id: String(c.id), category_name: c.name, parent_id: 0 }));
   const streamList = [];
   const categoryStreams = new Map();
+  // The full stream list is every category's list in order, so its JSON is theirs joined, not a second pass.
+  const listJson = [];
   for (const c of ordered) {
     for (const s of c.list) s.num = streamList.push(s);
-    categoryStreams.set(String(c.id), gz(c.list));
+    const json = JSON.stringify(c.list);
+    listJson.push(json.slice(1, -1));
+    categoryStreams.set(String(c.id), yield json);
   }
+  const categoriesGz = yield JSON.stringify(categories);
+  const streamsGz = yield `[${listJson.filter(Boolean).join(",")}]`;
   return {
-    channels: pool.channels,
+    channels,
     builtAt: Date.now(),
     count: streamList.length,
     entries,
@@ -228,8 +271,8 @@ function buildView(pool, ids, countries, home = HOME, noArchive = null) {
     homeCountry: curated ? curated.country : null,
     categoryList: categories,
     streamList,
-    categoriesGz: gz(categories),
-    streamsGz: gz(streamList),
+    categoriesGz,
+    streamsGz,
     categoryStreams,
     live: null,
     guide: null,
@@ -415,10 +458,13 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     if (view.channels !== pool.channels && !pendingViews.has(profile)) {
       // Same timing as the event index (addon.js liveEventIndex): wait so queued requests go first, and leave a gap
       // after the last build so a burst of provider refreshes rebuilds once.
+      // The rebuild runs in slices, so requests keep being answered from the current view while it builds.
       const wait = Math.max(viewRebuildDelayMs, view.builtAt + viewRebuildGapMs - Date.now());
       const timer = setTimeout(() => {
-        pendingViews.delete(profile);
-        rebuildView(pool, user, profile);
+        const build = rebuildViewSliced(pool, user, profile)
+          .catch((e) => log.error(`[XTREAM] View "${profile || "all"}" rebuild failed: ${e.message}`))
+          .finally(() => pendingViews.delete(profile));
+        pendingViews.set(profile, build);
       }, wait);
       if (timer.unref) timer.unref();
       pendingViews.set(profile, timer);
@@ -426,18 +472,29 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
     return view;
   }
 
+  // Builds the view in one go, blocking every other request while it runs.
   function rebuildView(pool, user, profile) {
     const start = Date.now();
+    const archiveRev = archives.revision();
+    return keepView(profile, buildView(pool, ids, user.countries, HOME, archives.hidden()), archiveRev, start, "");
+  }
+
+  async function rebuildViewSliced(pool, user, profile) {
+    const start = Date.now();
+    const archiveRev = archives.revision();
+    return keepView(profile, await buildViewSliced(pool, ids, user.countries, HOME, archives.hidden()), archiveRev, start, " in slices");
+  }
+
+  function keepView(profile, view, archiveRev, start, how) {
     const prev = views.get(profile);
-    const view = buildView(pool, ids, user.countries, HOME, archives.hidden());
-    view.archiveRev = archives.revision();
+    view.archiveRev = archiveRev;
     view.archiveAt = now();
     if (prev) {
       view.guide = prev.guide;
       view.windowGuides = prev.windowGuides;
     }
     views.set(profile, view);
-    log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms`);
+    log.log(`[XTREAM] View "${profile || "all"}": ${view.count} channels, streams ${view.streamsGz.length} bytes gzipped, ${Date.now() - start} ms${how}`);
     return view;
   }
 
@@ -936,4 +993,4 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   return router;
 }
 
-module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape };
+module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildViewSliced, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape };

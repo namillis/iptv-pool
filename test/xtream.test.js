@@ -7,7 +7,7 @@ const path = require("path");
 const zlib = require("zlib");
 const express = require("express");
 const { XtreamIds } = require("../xtream/ids");
-const { createXtreamRouter, buildView, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape } = require("../xtream/api");
+const { createXtreamRouter, buildView, buildViewSliced, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape } = require("../xtream/api");
 
 function tile(key, name, members, extra = {}) {
   return {
@@ -43,6 +43,20 @@ test("stream ids stay the same across merges and are never reused", () => {
 
   const b2 = tile("US|ESPN", "ESPN", [["teck", "2"]]);
   assert.strictEqual(ids.assignStreams([b2]).get(b2), 2);
+});
+
+test("a channel the pool reused keeps its id, and a stream that moves to a new channel takes its id along", () => {
+  const ids = new XtreamIds(null);
+  const cnn = tile("US|CNN", "CNN", [["teck", "1"]]);
+  const espn = tile("US|ESPN", "ESPN", [["teck", "2"], ["nova", "4"]]);
+  ids.assignStreams([cnn, espn]);
+  // The next merge reuses the CNN tile object; ESPN's nova stream moves to a channel of its own.
+  const espn2 = tile("US|ESPN", "ESPN", [["teck", "2"]]);
+  const espnNova = tile("US|ESPNNOVA", "ESPN Nova", [["nova", "4"]]);
+  const got = ids.assignStreams([cnn, espn2, espnNova]);
+  assert.deepStrictEqual([got.get(cnn), got.get(espn2), got.get(espnNova)], [1, 2, 3]);
+  assert.strictEqual(ids.state.members["nova/4"], 3);
+  assert.strictEqual(ids.state.members["teck/1"], 1);
 });
 
 test("a renamed key keeps its number through a shared member", () => {
@@ -106,6 +120,22 @@ function fakePool() {
     updateData: () => Promise.resolve(),
   };
 }
+
+test("the sliced view build gives the same view as the one-go build, and lets other work run while it builds", async () => {
+  const pool = fakePool();
+  const whole = buildView(pool, new XtreamIds(null), ["UK", "US"], null);
+  let otherWorkRan = false;
+  setImmediate(() => { otherWorkRan = true; });
+  const sliced = await buildViewSliced(pool, new XtreamIds(null), ["UK", "US"], null, null, 0);
+  assert.ok(otherWorkRan);
+  const plain = (v) => ({
+    ...v, builtAt: 0,
+    categoriesGz: gunzipJson(v.categoriesGz),
+    streamsGz: gunzipJson(v.streamsGz),
+    categoryStreams: [...v.categoryStreams].map(([id, gz]) => [id, gunzipJson(gz)]),
+  });
+  assert.deepStrictEqual(plain(sliced), plain(whole));
+});
 
 test("a view filters by country, orders categories and indexes streams by category", () => {
   const pool = fakePool();
