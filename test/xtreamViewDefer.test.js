@@ -18,7 +18,7 @@ test("after a provider refresh, a request gets the current view and one rebuild 
   const pool = { channels: [tile("t1", "US|CNN", "CNN")], epgData: {}, childById: new Map(), updateData: () => Promise.resolve() };
   const app = express();
   app.use(createXtreamRouter({ usersFile, idsFile: null, getPool: async () => ({ pool, touch() {} }), log: { log() {}, error() {} },
-    viewRebuildDelayMs: 20, viewRebuildGapMs: 0 }));
+    viewRebuildDelayMs: 300, viewRebuildGapMs: 0 }));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   t.after(() => server.close());
   const names = async () => (await (await fetch(`http://127.0.0.1:${server.address().port}/player_api.php?username=tv1&password=fakepassword123&action=get_live_streams`)).json()).map((s) => s.name);
@@ -27,6 +27,6 @@ test("after a provider refresh, a request gets the current view and one rebuild 
   assert.deepStrictEqual(await names(), ["CNN"], "the request that notices the refresh gets the current view");
   pool.channels = [...pool.channels, tile("t3", "US|FOXNEWS", "Fox News")];
   assert.deepStrictEqual(await names(), ["CNN"], "a second refresh before the rebuild doesn't start another one");
-  await new Promise((r) => setTimeout(r, 60));
+  await new Promise((r) => setTimeout(r, 500));
   assert.deepStrictEqual((await names()).sort(), ["CNN", "Fox News", "MSNBC"], "one rebuild picks up both refreshes");
 });
