@@ -386,7 +386,10 @@ class Upstream {
     this.closed = true;
     clearInterval(this.watchdog);
     clearTimeout(this.idleTimer);
-    if (this.current && this.conn) this.report.outcome(this.current, { ok: true, ended: why, playedMs: this.now() - this.playStart });
+    if (this.current && this.conn) {
+      this.log(`[RELAY] "${this.key}" closed (${why}) after ${Math.round((this.now() - this.playStart) / 1000)} s on ${this.current.pid}`);
+      this.report.outcome(this.current, { ok: true, ended: why, playedMs: this.now() - this.playStart });
+    }
     if (this.conn) this.conn.req.destroy();
     this.conn = null;
     for (const client of this.clients) client.end();
