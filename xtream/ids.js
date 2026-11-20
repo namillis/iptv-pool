@@ -32,11 +32,18 @@ class XtreamIds {
     this.state = state;
   }
 
+  /**
+   * Stream ids for [tiles], keeping each channel's id across merges. A tile object the last call also got, with the
+   * same id, has the same members (the pool reuses a channel only when its streams are unchanged), so their ids are
+   * already recorded and aren't checked again. That keeps a merge where one provider changed from walking every
+   * stream of all the others.
+   */
   assignStreams(tiles) {
     const { keys, members } = this.state;
     const ids = new Map();
     const claimed = new Set();
     const fresh = [];
+    const previous = this.lastIds || new Map();
     let changed = false;
 
     for (const tile of tiles) {
@@ -76,6 +83,7 @@ class XtreamIds {
     }
 
     for (const [tile, id] of ids) {
+      if (previous.get(tile) === id) continue;
       for (const m of tile._members) {
         const k = memberKey(m);
         if (members[k] !== id) {
@@ -86,6 +94,7 @@ class XtreamIds {
     }
 
     if (changed) this.scheduleSave();
+    this.lastIds = ids;
     return ids;
   }
 
