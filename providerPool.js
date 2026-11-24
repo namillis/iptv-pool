@@ -6,6 +6,7 @@ const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 const { HOME, tileCountry } = require('./xtream/api');
 const { categoryFor, categoryRank } = require('./xtream/categories');
+const { categoryOf, SPORT_CATEGORIES } = require('./liveEvents');
 
 const SEP = '~';
 const ID_RE = /^[a-z0-9]{1,8}$/;
@@ -480,6 +481,12 @@ class ProviderPool extends M3UEPGAddon {
         return this.listedView().home.get(catalogId) || [];
     }
 
+    // An event's genre is its sport (Football, ...) or TV category (TV, Special), not the provider groups carrying it.
+    eventGenres(e) {
+        const category = categoryOf(e);
+        return category ? [category] : [];
+    }
+
     listedEvent(e) {
         if (!e || !this.countries) return e || null;
         const channels = e.channels.filter(ch => this.tileListed(this.tileById.get(ch.id)));
@@ -509,6 +516,12 @@ class ProviderPool extends M3UEPGAddon {
         const home = HOME_CATALOGS
             .filter(name => this.homeChannels(homeCatalogId(name)).length)
             .map(name => ({ type: 'tv', id: homeCatalogId(name), name, extra: [{ name: 'search' }, { name: 'skip' }] }));
+        const liveSports = byId.get('iptv_live_now');
+        if (liveSports) {
+            liveSports.genres = [...SPORT_CATEGORIES];
+            const genreExtra = liveSports.extra.find(e => e.name === 'genre');
+            if (genreExtra) genreExtra.options = [...SPORT_CATEGORIES];
+        }
         const tv = [byId.get('iptv_live_now'), byId.get('iptv_popular_tv'), ...home, all].filter(Boolean);
         catalogs.splice(0, catalogs.length, ...tv, ...catalogs.filter(c => c.type !== 'tv'));
     }

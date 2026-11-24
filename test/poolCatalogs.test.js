@@ -140,3 +140,24 @@ test("All Channels' genres are the Xtream login's categories, in the same order 
   assert.deepStrictEqual(p.generateMetaPreview(cnn).genres, ["News"]);
   assert.deepStrictEqual(p.genreChannels(p.listedChannels(), "UK | News").map((t) => t._key), ["UK|BBCNEWS"]);
 });
+
+test("Live Sports and Popular on TV events have their sport or TV category as genre, not provider groups", async () => {
+  const { p, manifest } = await pool(["US"]);
+  const cnn = p.channels.find((t) => t._key === "US|CNN");
+  const now = Date.now();
+  const event = (title, extra) => ({ id: `iptv_ev_${title}`, title, start: now, end: now + 3600000, channels: [{ id: cnn.id }], sources: ["USA VIP", "USA SPORTS"], ...extra });
+  const game = event("Bengals @ Commanders", { sport: "Football", network: "CBS" });
+  const show = event("The Traitors", { category: "TV" });
+  p.liveEventIndex = () => new Map([[game.id, game], [show.id, show]]);
+  p.eventChannels = (ev) => ev.channels;
+  const gameMeta = p.eventMetaPreview(game, now);
+  assert.deepStrictEqual(gameMeta.genres, ["Football"]);
+  assert.doesNotMatch(gameMeta.description, /USA VIP|USA SPORTS/);
+  assert.match(gameMeta.description, /Football · CBS · 1 channel$/);
+  assert.deepStrictEqual(p.eventMetaPreview(show, now).genres, ["TV"]);
+  p.buildGenresInManifest();
+  const liveSports = manifest.catalogs.find((c) => c.id === "iptv_live_now");
+  assert.ok(liveSports.genres.includes("Football"));
+  assert.ok(!liveSports.genres.includes("USA VIP"));
+  assert.deepStrictEqual(liveSports.extra.find((e) => e.name === "genre").options, liveSports.genres);
+});
