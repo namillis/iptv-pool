@@ -499,3 +499,35 @@ test("with the relay on, live TS goes to the relay with the channel's streams be
   const body = await (await fetch(`${base}/player_api.php?${q}&action=pool_sources&stream_id=${espn}`)).json();
   assert.deepStrictEqual(body.sources.map((x) => [x.source, x.current, x.failed]), [["nova.2", true, false], ["teck.1", false, true]]);
 });
+
+test("Stremio plays a pool channel through the relay as the stremio login", async (t) => {
+  const relay = {
+    record: new SourceRecord(),
+    opened: [],
+    enabledFor: (u) => u === "stremio",
+    held: () => 0,
+    open(session) {
+      this.opened.push(session);
+      return "cd".repeat(16);
+    },
+  };
+  const { pool, router } = await start(t, { relay });
+  assert.ok(router.stremio.enabled());
+  const espn = pool.channels.find((c) => c.name === "ESPN");
+  espn.id = "iptv_ch_0123456789abcdef";
+  const app = express();
+  app.get("/play", (req, res) => router.stremio.play(req, res, pool, espn));
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  t.after(() => server.close());
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/play`, { redirect: "manual" });
+  assert.strictEqual(r.status, 302);
+  assert.match(r.headers.get("location"), new RegExp(`/relay/${"cd".repeat(16)}\\.ts$`));
+  const s = relay.opened[0];
+  assert.strictEqual(s.user, "stremio");
+  assert.strictEqual(s.streamId, espn.id);
+  assert.strictEqual(s.userMax, 4);
+  assert.deepStrictEqual(s.candidates.map((c) => c.pid), ["teck", "nova"]);
+  assert.deepStrictEqual(router.stremio.order(pool, espn).map((m) => m._pid), ["teck", "nova"]);
+});
