@@ -6,6 +6,7 @@ const { clientIp, isLockedOut, recordFailure, clearFailures } = require("../site
 const { XtreamIds } = require("./ids");
 const { buildEvents, LIVE_SPORTS, POPULAR_TV } = require("./events");
 const { categoryFor, categoryRank } = require("./categories");
+const { cleanName } = require("../channelMerge");
 const { Playback, memberUrl, convertStart, memberKey, sourceKey } = require("./playback");
 const { ArchiveMemory } = require("./archive");
 const LRUCache = require("../lruCache");
@@ -217,7 +218,7 @@ function* viewSteps({ channels, epgData }, ids, streamIds, countries, home, noAr
     const archived = !!tile._catchup && !(noArchive && noArchive.has(tile._key));
     const stream = {
       num: 0,
-      name: tile.name,
+      name: tile.label || tile.name,
       stream_type: "live",
       stream_id: streamIds.get(tile),
       stream_icon: tile.logo || "",
@@ -368,7 +369,7 @@ async function buildGuide(view, epgData, window = null) {
   for (const [epgKey, tile] of channels) {
     const id = xmlEscape(epgChannelId(epgKey));
     const icon = tile.logo ? `<icon src="${xmlEscape(tile.logo)}"/>` : "";
-    await out(`<channel id="${id}"><display-name>${xmlEscape(tile.name)}</display-name>${icon}</channel>\n`);
+    await out(`<channel id="${id}"><display-name>${xmlEscape(tile.label || tile.name)}</display-name>${icon}</channel>\n`);
   }
   for (const epgKey of channels.keys()) {
     const id = xmlEscape(epgChannelId(epgKey));
@@ -896,7 +897,7 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
         return {
           source: sourceKey(m),
           provider: nameOf(m._pid),
-          name: String(m.name || "").trim(),
+          name: cleanName(m.name),
           quality: label.replace(/\s*backup$/i, "").replace(/^Backup$/, ""),
           backup: /backup/i.test(label),
           current: current === memberKey(m),

@@ -164,3 +164,39 @@ test("a merge asked for during another runs after it, not alongside", async () =
   while (p.merging) await p.merging;
   assert.deepStrictEqual(p.channels.map((t) => t._key).sort(), ["US|CNN", "US|ESPN"]);
 });
+
+test("cleanName drops the country and feed tags in front of a name, and keeps the name", () => {
+  const { cleanName } = require("../channelMerge");
+  const cases = [
+    ["AT&T: CBS NEWS COLORADO", "CBS NEWS COLORADO"],
+    ["US| NEWS 9 SAN DIEGO (KUSI)", "NEWS 9 SAN DIEGO (KUSI)"],
+    ["USA: NAT GEO (WEST)", "NAT GEO (WEST)"],
+    ["US | NBC04", "NBC04"],
+    ["USA - NBC WEST", "NBC WEST"],
+    ["| US | FOX WEATHER", "FOX WEATHER"],
+    ["|UK| BBC ONE", "BBC ONE"],
+    ["[UK] The Big Bang Theory", "The Big Bang Theory"],
+    ["(US) ESPN PLAY 27 (D)", "ESPN PLAY 27 (D)"],
+    ["USA**:FOX (KTTV - LOS ANGELES", "FOX (KTTV - LOS ANGELES"],
+    ["US_HD:Cinema 11 PPV", "Cinema 11 PPV"],
+    ["(US LOC) NBC 5 (KING) Seattle", "NBC 5 (KING) Seattle"],
+    ["USA Latino | Telemundo 44 Charlotte", "Telemundo 44 Charlotte"],
+    ["VIP UK: SKY TENNIS", "SKY TENNIS"],
+    ["US (ESPN+ 434) | ESPN+: Hofstra vs. Fordham", "(ESPN+ 434) | ESPN+: Hofstra vs. Fordham"],
+    ["US-DAZN 1 HD", "DAZN 1 HD"],
+    ["Uk: ITV 1", "ITV 1"],
+    ["US: USA NETWORK", "USA NETWORK"],
+  ];
+  for (const [name, want] of cases) assert.strictEqual(cleanName(name), want, name);
+  for (const name of ["USA NETWORK", "UK GOLD", "USA PPV57", "flowrestling: Indee JH: 1", "24/7: Seinfeld", "US"])
+    assert.strictEqual(cleanName(name), name, `${name} has no tag`);
+});
+
+test("a pool channel shows its name without the tag, and keeps the full name for matching", async () => {
+  const p = pool([["a", ""]]);
+  p.childById.get("a").channels = [ch("1", "USA: CNN", "USA | News")];
+  await p.merge();
+  assert.strictEqual(p.channels[0].name, "USA: CNN");
+  assert.strictEqual(p.channels[0].label, "CNN");
+  assert.strictEqual(p.generateMetaPreview(p.channels[0]).name, "CNN");
+});

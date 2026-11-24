@@ -1,6 +1,6 @@
 const fs = require('fs');
 const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, markUsed, EVENT_STREAMS_MAX } = require('./addon');
-const { categoryCountry, displayName, tileId } = require('./channelMerge');
+const { categoryCountry, displayName, cleanName, tileId } = require('./channelMerge');
 const { TILE_HEADER } = require('./mergePlan');
 const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
@@ -338,6 +338,7 @@ class ProviderPool extends M3UEPGAddon {
             id: id || tileId(key),
             type: 'tv',
             name: displayName(rep.name),
+            label: cleanName(displayName(rep.name)),
             category: groupNames[0] || '',
             logo,
             attributes: { 'tvg-logo': logo || undefined, 'group-title': groupNames[0] || undefined },
@@ -488,7 +489,7 @@ class ProviderPool extends M3UEPGAddon {
     memberStream(m, name) {
         const child = this.childById.get(m._pid);
         const stream = child && child.getStream(m._src);
-        return stream ? { ...stream, name, title: m.name.trim() } : null;
+        return stream ? { ...stream, name, title: cleanName(m.name) } : null;
     }
 
     getStreams(id) {
@@ -498,7 +499,7 @@ class ProviderPool extends M3UEPGAddon {
             return stream ? [stream] : [];
         }
         if (!this.relayPlayable()) return this.directStreams(tile._members);
-        return [this.relayStream(tile, autoStreamName(tile), tile.name), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
+        return [this.relayStream(tile, autoStreamName(tile), tile.label), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
     }
 
     directStreams(members) {
@@ -557,7 +558,7 @@ class ProviderPool extends M3UEPGAddon {
             const tile = this.tileById.get(ch.id);
             if (tile) lists.push({ ch, tile, members: [...tile._primary] });
         }
-        const relayed = this.relayPlayable() ? lists.map(l => this.relayStream(l.tile, `Auto\n${l.ch.source}`, l.ch.slot)) : [];
+        const relayed = this.relayPlayable() ? lists.map(l => this.relayStream(l.tile, `Auto\n${l.ch.source}`, cleanName(l.ch.slot))) : [];
         const max = relayed.length ? RELAY_FALLBACKS : EVENT_STREAMS_MAX;
         const streams = [];
         const take = ({ ch, members }) => {
@@ -581,6 +582,10 @@ class ProviderPool extends M3UEPGAddon {
             }
         }
         return [...relayed, ...streams];
+    }
+
+    eventChannelLabel(ch) {
+        return cleanName(ch.slot);
     }
 
     getDetailedMeta(id) {

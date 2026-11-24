@@ -183,6 +183,30 @@ function displayName(name) {
     return stripped.length >= 2 ? stripped : text;
 }
 
+// Country and feed tags providers put in front of a name ("US| ", "USA: ", "| UK | ", "[UK] ", "USA**:", "AT&T: ",
+// "USA Latino | "). A tag needs its separator, so "USA Network" and "UK Gold" keep their country word.
+const NAME_TAG_RES = [
+    /^\s*[|[(┃]?\s*(?:US|USA|UK|GB)(?:\*\*|_HD)?\s*[|\]):\-–•┃]+\s*/i,
+    /^\s*(?:AT&T|VIP UK|ASIA-US|USA (?:Latino|Latina|Kids))\s*[|:]\s*/i,
+    /^\s*\(US LOC\)\s*/i,
+    /^\s*US\s+(?=\()/
+];
+
+/**
+ * A name as people see it, without the tags in front. Only names shown in the apps go through this: the pool's
+ * keys and its event matching read the provider's full name, which says which country a channel is from.
+ */
+function cleanName(name) {
+    const text = String(name || '').trim();
+    let out = text;
+    for (let i = 0; i < 3; i++) {
+        const next = NAME_TAG_RES.reduce((t, re) => t.replace(re, ''), out);
+        if (next === out) break;
+        out = next;
+    }
+    return out.length >= 2 ? out : text;
+}
+
 function tileId(key) {
     return 'iptv_ch_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16);
 }
@@ -213,4 +237,4 @@ function groupByKey(members, keyOf) {
     return [...byKey.values()];
 }
 
-module.exports = { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey, KEY_ALIASES };
+module.exports = { channelKey, categoryCountry, streamQuality, displayName, cleanName, tileId, groupByKey, KEY_ALIASES };

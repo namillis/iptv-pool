@@ -139,7 +139,7 @@ function buildEvents(pool, { countries = [], categoryId, categoryName, kind = nu
     const live = eventState(e, now) === "live";
     // A TV show is named by its network ("Fox News", "NBC"); the show is the guide line under it. A game keeps its
     // matchup as the name, with the league under it.
-    const base = isTvEvent(e) ? e.network || tiles[0].name || e.title : e.title;
+    const base = isTvEvent(e) ? e.network || tiles[0].label || tiles[0].name || e.title : e.title;
     const name = live ? base : `${base} · ${pool.formatEventTime(e.start, now)}`;
     const id = eventNumber(e.id, taken);
     taken.add(id);

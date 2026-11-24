@@ -436,8 +436,8 @@ test("sources list the channel's streams in order and mark the current one", () 
   pb.live(user(), 7, a, "ts", null, { attempt: 0, refused: false, source: "nova.2" });
   const names = { teck: "Main", nova: "Nova" };
   assert.deepStrictEqual(pb.sources("tv1", 7, a, (pid) => names[pid]), [
-    { source: "teck.1", provider: "Main", name: "US - ESPN HD", quality: "HD", backup: false, current: false, failed: false },
-    { source: "nova.2", provider: "Nova", name: "US| ESPN [BK]", quality: "HD", backup: true, current: true, failed: false },
+    { source: "teck.1", provider: "Main", name: "ESPN HD", quality: "HD", backup: false, current: false, failed: false },
+    { source: "nova.2", provider: "Nova", name: "ESPN [BK]", quality: "HD", backup: true, current: true, failed: false },
   ]);
   assert.ok(pb.sources("tv2", 7, a, (pid) => pid).every((s) => !s.current));
 });
