@@ -88,7 +88,8 @@ class MergePlanner {
 
     /**
      * One provider's streams, from the main thread: [names], [groups] (category), [epgIds] (guide id or null),
-     * [catchup] (1 when catch-up works on it), [guides] (guide ids that have listings) and the provider's [country].
+     * [catchup] (1 when catch-up works on it), [guides] ([guide id, listing count] for ids that have listings) and the
+     * provider's [country].
      * Returns each stream's channel key and quality label, and each label's rank.
      */
     setProvider({ pid, country, names, groups, epgIds, catchup, guides }) {
@@ -110,7 +111,7 @@ class MergePlanner {
             qualities[q.label] = q.rank;
             epgKeys[i] = epgIds[i] ? `${pid}/${epgIds[i]}` : null;
         }
-        this.providers.set(pid, { pid, names, epgIds, catchup, keys, qRanks, epgKeys, guides: new Set(guides) });
+        this.providers.set(pid, { pid, names, epgIds, catchup, keys, qRanks, epgKeys, guides: new Map(guides) });
         return { keys, qLabels, qualities };
     }
 
@@ -129,7 +130,7 @@ class MergePlanner {
                 const epgId = p.epgIds[i];
                 members.push({
                     g, _key: key, _epgKey: p.epgKeys[i], name: p.names[i], _pid: pid, rank: rank.get(pid), q: p.qRanks[i],
-                    catchup: p.catchup[i] === 1, guided: !!epgId && p.guides.has(epgId),
+                    catchup: p.catchup[i] === 1, guided: epgId ? p.guides.get(epgId) || 0 : 0,
                 });
             }
         }
@@ -154,7 +155,12 @@ class MergePlanner {
             const ordered = primary.concat(rest);
             const dropped = new Set(list.filter(m => misfiled.has(`${m._epgKey}\n${key}`)).map(m => m._epgKey));
             const trusted = m => m._epgKey && !dropped.has(m._epgKey);
-            const guidedPos = ordered.findIndex(m => trusted(m) && m.guided);
+            // The guide with the most listings: a provider whose guide for the channel is one old entry would leave it
+            // with nothing on now.
+            let guidedPos = -1;
+            ordered.forEach((m, i) => {
+                if (trusted(m) && m.guided > (guidedPos >= 0 ? ordered[guidedPos].guided : 0)) guidedPos = i;
+            });
             layout[pos++] = ordered.length;
             layout[pos++] = primary.length;
             layout[pos++] = guidedPos >= 0 ? guidedPos : trusted(ordered[0]) ? 0 : -1;
