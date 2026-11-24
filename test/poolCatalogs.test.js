@@ -140,3 +140,31 @@ test("All Channels' genres are the Xtream login's categories, in the same order 
   assert.deepStrictEqual(p.generateMetaPreview(cnn).genres, ["News"]);
   assert.deepStrictEqual(p.genreChannels(p.listedChannels(), "UK | News").map((t) => t._key), ["UK|BBCNEWS"]);
 });
+
+test("a channel's guide is the provider's with the most listings, and its show on now is under the name and on Auto", async () => {
+  const manifest = baseManifest({ liveOnly: true });
+  const p = new ProviderPool({
+    settings: { liveOnly: true, countries: ["US"] },
+    inlineMerge: true,
+    providers: ["a", "b"].map((id) => ({ id, name: id, country: "", config: { provider: "direct", m3uUrl: "http://example.invalid/list.m3u" } })),
+  }, manifest);
+  p.manifestReady = true;
+  const tvg = (id) => ({ ...ch(id, "US: CNN", "USA | News"), attributes: { "group-title": "USA | News", "tvg-id": "cnn.us" } });
+  const now = Date.now() / 1000;
+  p.childById.get("a").channels = [tvg("1")];
+  p.childById.get("a").epgData = { "cnn.us": [{ s: now - 90000, e: now - 86400, t: "Yesterday" }] };
+  p.childById.get("b").channels = [tvg("2")];
+  p.childById.get("b").epgData = { "cnn.us": [{ s: now - 600, e: now + 600, t: "Anderson Cooper 360" }, { s: now + 600, e: now + 4200, t: "Later" }] };
+  await p.merge();
+  const cnn = p.channels.find((t) => t._key === "US|CNN");
+  assert.strictEqual(cnn._epg, "b/cnn.us", "the guide with more listings wins over the first provider's single old entry");
+  assert.strictEqual(p.generateMetaPreview(cnn).releaseInfo, "Anderson Cooper 360");
+  assert.strictEqual(p.getDetailedMeta(cnn.id).releaseInfo, "Anderson Cooper 360");
+  p.publicBase = "https://iptv.example/pool-key";
+  p.stremioRelay = fakeRelay();
+  assert.strictEqual(p.getStreams(cnn.id)[0].title, "CNN\nAnderson Cooper 360");
+  p.childById.get("b").epgData = {};
+  p.epgData = {};
+  assert.strictEqual(p.getStreams(cnn.id)[0].title, "CNN\nSwitches sources by itself", "no guide, the old line");
+  assert.strictEqual(p.generateMetaPreview(cnn).releaseInfo, undefined);
+});

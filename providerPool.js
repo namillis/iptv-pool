@@ -209,7 +209,7 @@ class ProviderPool extends M3UEPGAddon {
         const pid = child.poolId;
         const epg = child.epgData || {};
         const guides = [];
-        for (const k in epg) if (epg[k]?.length) guides.push(k);
+        for (const k in epg) if (epg[k]?.length) guides.push([k, epg[k].length]);
         const epgIds = src.map(i => M3UEPGAddon.prototype.epgIdOf.call(this, i));
         const { keys, qLabels, qualities } = await planner.setProvider({
             pid,
@@ -519,8 +519,23 @@ class ProviderPool extends M3UEPGAddon {
 
     generateMetaPreview(item) {
         const meta = super.generateMetaPreview(item);
-        if (item._members) meta.genres = this.channelGroups(item);
+        if (item._members) {
+            meta.genres = this.channelGroups(item);
+            this.addNowShowing(meta, item);
+        }
         return meta;
+    }
+
+    // The show on [tile] now from its guide, or null.
+    nowShowing(tile) {
+        const p = this.getCurrentProgram(this.epgIdOf(tile));
+        return p && p.title ? p.title : null;
+    }
+
+    // Nuvio's player shows a meta's releaseInfo under the channel name, so it carries the show on now.
+    addNowShowing(meta, tile) {
+        const show = this.nowShowing(tile);
+        if (show) meta.releaseInfo = show;
     }
 
     channelWeight(ch) {
@@ -541,7 +556,7 @@ class ProviderPool extends M3UEPGAddon {
             return stream ? [stream] : [];
         }
         if (!this.relayPlayable()) return this.directStreams(tile._members);
-        return [this.relayStream(tile, autoStreamName(tile), tile.label), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
+        return [this.relayStream(tile, autoStreamName(tile), tile.label, this.nowShowing(tile)), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
     }
 
     directStreams(members) {
@@ -560,9 +575,10 @@ class ProviderPool extends M3UEPGAddon {
         return !!this.stremioRelay && !!this.publicBase && this.stremioRelay.enabled();
     }
 
-    // The relay races the channel's sources and switches to another mid-show if one stalls.
-    relayStream(tile, name, title) {
-        return { name, title: `${title}\nSwitches sources by itself`, url: `${this.publicBase}/play/${tile.id}.ts`, behaviorHints: { notWebReady: true } };
+    // The relay races the channel's sources and switches to another mid-show if one stalls. The title's second line
+    // is [detail], the show on now when the guide has it.
+    relayStream(tile, name, title, detail = null) {
+        return { name, title: `${title}\n${detail || 'Switches sources by itself'}`, url: `${this.publicBase}/play/${tile.id}.ts`, behaviorHints: { notWebReady: true } };
     }
 
     // What a channel's stream list holds, for its description.
@@ -637,6 +653,7 @@ class ProviderPool extends M3UEPGAddon {
             if (meta) {
                 meta.description = `${meta.description}\n\n🔌 ${this.sourcesLine(tile)}`;
                 meta.genres = this.channelGroups(tile);
+                this.addNowShowing(meta, tile);
             }
             return meta;
         }
