@@ -105,3 +105,18 @@ test("with the relay on, an event lists one relay stream per channel, then up to
   assert.deepStrictEqual(streams.slice(0, 2).map((s) => s.url), [`https://iptv.example/pool-key/play/${tile("US|CNN").id}.ts`, `https://iptv.example/pool-key/play/${tile("US|FOXNEWS").id}.ts`]);
   assert.deepStrictEqual(streams.slice(2).map((s) => s.url), ["http://a.example/1.ts", "http://a.example/2.ts"]);
 });
+
+test("a channel's description says what Auto does, with no provider list or catch-up, and its streams have no catch-up", async () => {
+  const { p } = await pool(["US"]);
+  p.publicBase = "https://iptv.example/pool-key";
+  p.stremioRelay = fakeRelay();
+  const cnn = p.channels.find((t) => t._key === "US|CNN");
+  cnn._catchup = cnn._members[0];
+  cnn.archiveDays = 2;
+  const { description } = p.getDetailedMeta(cnn.id);
+  assert.match(description, /Auto plays the best of 1 stream from 1 provider and switches if one stalls/);
+  assert.doesNotMatch(description, /PROVIDERS|CATCH-UP/);
+  assert.deepStrictEqual(await p.getCatchupStreams(cnn.id), []);
+  p.stremioRelay = fakeRelay(false);
+  assert.match(p.getDetailedMeta(cnn.id).description, /🔌 1 stream from 1 provider$/);
+});
