@@ -1,6 +1,6 @@
 const fs = require('fs');
 const { M3UEPGAddon, baseManifest, initialLoad, buildInterface, markUsed, EVENT_STREAMS_MAX } = require('./addon');
-const { categoryCountry, displayName, cleanName, tileId } = require('./channelMerge');
+const { categoryCountry, displayName, cleanName, countryTagged, tileId } = require('./channelMerge');
 const { TILE_HEADER } = require('./mergePlan');
 const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
@@ -27,6 +27,13 @@ const HOME_CATALOG_PREFIX = 'iptv_home_';
 for (const name of HOME_CATALOGS)
     if (!HOME.categories.some(c => c.name === name)) throw new Error(`xtream/home.json has no "${name}" category`);
 const homeCatalogId = (name) => HOME_CATALOG_PREFIX + name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+
+// The name the apps show for the channel with [key]: no provider tags, and "(UK)" after a UK channel's name so it
+// isn't mistaken for the US one ("CNN" and "CNN (UK)").
+function channelLabel(key, name) {
+    const label = cleanName(displayName(name));
+    return tileCountry(key) === 'UK' && !/\bUK\b/i.test(label) ? `${label} (UK)` : label;
+}
 // Direct streams listed under a relayed one, for picking a source by hand.
 const RELAY_FALLBACKS = 3;
 // Nuvio on Apple TV hides a stream with no quality in its name when others have one, so Auto carries the best
@@ -337,8 +344,8 @@ class ProviderPool extends M3UEPGAddon {
         return {
             id: id || tileId(key),
             type: 'tv',
-            name: displayName(rep.name),
-            label: cleanName(displayName(rep.name)),
+            name: displayName(countryTagged(rep.name)),
+            label: channelLabel(key, rep.name),
             category: groupNames[0] || '',
             logo,
             attributes: { 'tvg-logo': logo || undefined, 'group-title': groupNames[0] || undefined },

@@ -200,3 +200,26 @@ test("a pool channel shows its name without the tag, and keeps the full name for
   assert.strictEqual(p.channels[0].label, "CNN");
   assert.strictEqual(p.generateMetaPreview(p.channels[0]).name, "CNN");
 });
+
+test("feed-tagged copies key with the main channel, and keep their country for matching", async () => {
+  const { channelKey, countryTagged } = require("../channelMerge");
+  assert.strictEqual(channelKey("AT&T: CNN", "US"), channelKey("USA: CNN", "US"));
+  assert.strictEqual(channelKey("USA Kids | Disney XD", ""), channelKey("USA: DISNEY XD", ""));
+  assert.strictEqual(channelKey("VIP UK: SKY TENNIS", ""), channelKey("UK: SKY TENNIS", ""));
+  assert.strictEqual(channelKey("USA**:NBC (WRCDT WASHINGTON", ""), "CALL|WRC|NBC");
+  assert.strictEqual(channelKey("USA**:FOX (WTTG - WASHINGTON D.C.)", ""), "CALL|WTTG|FOX");
+  assert.strictEqual(channelKey("USA**:NC | WASHINGTON | NBC WITN", ""), "CALL|WITN|NBC");
+  assert.strictEqual(countryTagged("AT&T: CNN"), "US: CNN");
+  assert.strictEqual(countryTagged("USA: CNN"), "USA: CNN");
+
+  const p = pool([["a", ""], ["b", ""]]);
+  p.childById.get("a").channels = [ch("1", "AT&T: CNN", "AT&T")];
+  p.childById.get("b").channels = [ch("2", "USA: CNN", "USA | News"), ch("3", "UK: CNN", "UK | News"), ch("4", "UK: ITV UK", "UK | General")];
+  await p.merge();
+  const byKey = new Map(p.channels.map((t) => [t._key, t]));
+  assert.deepStrictEqual(byKey.get("US|CNN")._members.map((m) => m._pid).sort(), ["a", "b"], "the AT&T copy joined CNN");
+  assert.match(byKey.get("US|CNN").name, /^USA?: CNN$/, "the full name keeps a US tag for event matching");
+  assert.strictEqual(byKey.get("US|CNN").label, "CNN");
+  assert.strictEqual(byKey.get("UK|CNN").label, "CNN (UK)");
+  assert.strictEqual(byKey.get("UK|ITVUK").label, "ITV UK", "no (UK) when the name already says UK");
+});
