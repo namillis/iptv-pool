@@ -468,17 +468,6 @@ class ProviderPool extends M3UEPGAddon {
         catalogs.splice(0, catalogs.length, ...tv, ...catalogs.filter(c => c.type !== 'tv'));
     }
 
-    providerSummary(tile, max = 3) {
-        const names = tile._primary.map(m => this.childById.get(m._pid).poolName);
-        return names.length > max ? `${names.slice(0, max).join(', ')} +${names.length - max}` : names.join(', ');
-    }
-
-    generateMetaPreview(item) {
-        const meta = super.generateMetaPreview(item);
-        if (item._members && this.children.length > 1) meta.description = `${meta.description}\n🔌 ${this.providerSummary(item)}`;
-        return meta;
-    }
-
     channelById(id) {
         return this.tileById.get(id) || null;
     }
@@ -525,6 +514,14 @@ class ProviderPool extends M3UEPGAddon {
         return { name, title: `${title}\nSwitches sources by itself`, url: `${this.publicBase}/play/${tile.id}.ts`, behaviorHints: { notWebReady: true } };
     }
 
+    // What a channel's stream list holds, for its description.
+    sourcesLine(tile) {
+        const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+        const from = `${plural(tile._members.length, 'stream')} from ${plural(new Set(tile._members.map(m => m._pid)).size, 'provider')}`;
+        if (!this.relayPlayable()) return from;
+        return `Auto plays the best of ${from} and switches if one stalls. The streams under it are backups to pick by hand.`;
+    }
+
     getStream(id) {
         if (id.startsWith(TILE_PREFIX)) return this.tileById.has(id) ? this.getStreams(id)[0] || null : null;
         const r = this.route(id);
@@ -532,13 +529,13 @@ class ProviderPool extends M3UEPGAddon {
         return stream ? { ...stream, name: r.child.poolName } : null;
     }
 
-    async getCatchupStreams(id) {
-        const tile = this.tileById.get(id);
-        const m = tile && tile._catchup;
-        if (!m) return [];
-        const child = this.childById.get(m._pid);
-        const streams = await child.getCatchupStreams(m._src);
-        return streams.map(s => ({ ...s, name: `${child.poolName}\n${s.name}` }));
+    // Stremio and Nuvio only play what's on now, so a channel's streams have no catch-up. The Xtream logins keep it.
+    catchupListed() {
+        return false;
+    }
+
+    async getCatchupStreams() {
+        return [];
     }
 
     // Through the relay, one stream per channel, then the first few direct streams as a manual fallback. Direct
@@ -578,21 +575,11 @@ class ProviderPool extends M3UEPGAddon {
         return [...relayed, ...streams];
     }
 
-    eventChannelLabel(ch) {
-        const tile = this.tileById.get(ch.id);
-        return tile && this.children.length > 1 ? `${ch.slot} · ${this.providerSummary(tile, 2)}` : ch.slot;
-    }
-
     getDetailedMeta(id) {
         const tile = this.tileById.get(id);
         if (tile) {
             const meta = super.getDetailedMeta(id);
-            if (meta && this.children.length > 1) {
-                const counts = new Map();
-                for (const m of tile._members) counts.set(m._pid, (counts.get(m._pid) || 0) + 1);
-                const lines = [...counts].map(([pid, n]) => `${this.childById.get(pid).poolName}${n > 1 ? ` (${n} streams)` : ''}`);
-                meta.description = `${meta.description}\n\n🔌 PROVIDERS: ${lines.join(', ')}`;
-            }
+            if (meta) meta.description = `${meta.description}\n\n🔌 ${this.sourcesLine(tile)}`;
             return meta;
         }
         const r = this.route(id);

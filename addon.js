@@ -1147,6 +1147,11 @@ class M3UEPGAddon {
             this.providerName === 'xtream' && !this.config.xtreamUseM3U);
     }
 
+    // Whether a channel's Stremio page offers catch-up. The pool's doesn't, though its Xtream logins still do.
+    catchupListed(item) {
+        return this.catchupEnabledFor(item);
+    }
+
     catchupLabel(entry) {
         let date = new Date(entry.startTs * 1000);
         const m = entry.start.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
@@ -1276,7 +1281,7 @@ class M3UEPGAddon {
                     description += `${this.formatTime(p.startTime)} - ${p.title}\n`;
                 }
             }
-            if (this.catchupEnabledFor(item)) {
+            if (this.catchupListed(item)) {
                 const days = item.archiveDays;
                 description += `\n\n⏪ CATCH-UP: shows from the last ${days} day${days === 1 ? '' : 's'} are in the stream list`;
             }

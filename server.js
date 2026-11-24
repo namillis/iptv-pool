@@ -422,6 +422,8 @@ app.use("/:token", async (req, res, next) => {
     req.configToken = token;
     setPublicBase(req, req.addonInterface, token);
     req.addonInterface.pool.stremioRelay = xtreamRouter ? xtreamRouter.stremio : null;
+    if (req.path.startsWith("/stream/"))
+      console.log(`[STREMIO] ${req.path} via ${req.get("host")}, relay ${req.addonInterface.pool.relayPlayable() ? "on" : "off"} (${String(req.get("user-agent") || "").slice(0, 60)})`);
     return next();
   }
   if (!isConfigToken(token)) return next("route");
