@@ -5,7 +5,7 @@ const { TILE_HEADER } = require('./mergePlan');
 const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
 const { HOME, tileCountry } = require('./xtream/api');
-const { categoryFor } = require('./xtream/categories');
+const { categoryFor, categoryRank } = require('./xtream/categories');
 
 const SEP = '~';
 const ID_RE = /^[a-z0-9]{1,8}$/;
@@ -389,14 +389,6 @@ class ProviderPool extends M3UEPGAddon {
         return item._pid ? this.memberEpgId(item) : super.epgIdOf(item);
     }
 
-    channelGroups(c) {
-        return c._groups || super.channelGroups(c);
-    }
-
-    inGroup(item, group) {
-        return item._groups ? item._groups.includes(group) : super.inGroup(item, group);
-    }
-
     searchText(item) {
         if (!item._members) return super.searchText(item);
         if (item._search === null) {
@@ -417,29 +409,67 @@ class ProviderPool extends M3UEPGAddon {
     }
 
     /**
-     * The channels in the pool's countries, and the home lists built from them the way an Xtream login's are: each
-     * list's hand-picked channels in home.json order, then every other home-country channel filed under the same
-     * category name. Built once per merge.
+     * The channels in the pool's countries, filed into the same categories an Xtream login with those countries gets
+     * (see viewSteps in xtream/api.js): the home lists from home.json, each its hand-picked channels in order and then
+     * every other home-country channel of that category, then the rest by category ("News", then "UK | News"). Built
+     * once per merge.
      */
     listedView() {
         if (this.listed && this.listed.channels === this.channels) return this.listed;
         const channels = this.countries ? this.channels.filter(t => this.tileListed(t)) : this.channels;
         const curated = !this.countries || this.countries.has(HOME.country);
-        const lists = new Map(HOME_CATALOGS.map(name => [name, { picked: [], rest: [] }]));
-        const byIndex = HOME.categories.map(c => lists.get(c.name) || null);
+        const homeNames = HOME.categories.map(c => c.name);
+        const picked = homeNames.map(() => []);
+        const rest = homeNames.map(() => []);
+        const categoryOf = new Map();
+        const others = new Map();
         for (const tile of channels) {
             const slot = curated && HOME.slots.get(tile._key);
             if (slot) {
-                if (byIndex[slot.category]) byIndex[slot.category].picked[slot.rank] = tile;
+                picked[slot.category][slot.rank] = tile;
+                categoryOf.set(tile, homeNames[slot.category]);
                 continue;
             }
-            if (tileCountry(tile._key) !== HOME.country) continue;
-            const list = lists.get(categoryFor(tile._groups, tile.name, true));
-            if (list) list.rest.push(tile);
+            const country = tileCountry(tile._key);
+            const atHome = country === HOME.country;
+            const theme = categoryFor(tile._groups, tile.name, atHome);
+            const name = atHome ? theme : `${country} | ${theme}`;
+            categoryOf.set(tile, name);
+            const home = curated && atHome ? homeNames.indexOf(name) : -1;
+            if (home !== -1) rest[home].push(tile);
+            else {
+                let list = others.get(name);
+                if (!list) others.set(name, list = { theme, country: atHome ? '' : country, tiles: [] });
+                list.tiles.push(tile);
+            }
         }
-        const home = new Map([...lists].map(([name, l]) => [homeCatalogId(name), [...l.picked.filter(Boolean), ...l.rest]]));
-        this.listed = { channels: this.channels, listed: channels, home };
+        const byCategory = new Map();
+        homeNames.forEach((name, i) => {
+            const tiles = [...picked[i].filter(Boolean), ...rest[i]];
+            if (tiles.length) byCategory.set(name, tiles);
+        });
+        [...others].sort(([, a], [, b]) => a.country.localeCompare(b.country) || categoryRank(a.theme) - categoryRank(b.theme))
+            .forEach(([name, l]) => byCategory.set(name, l.tiles));
+        const home = new Map(HOME_CATALOGS.map(name => [homeCatalogId(name), byCategory.get(name) || []]));
+        this.listed = { channels: this.channels, listed: channels, home, byCategory, categoryOf };
         return this.listed;
+    }
+
+    // Stremio's genres for a channel are its category, the same one an Xtream login files it under.
+    channelGroups(c) {
+        if (!c._members) return super.channelGroups(c);
+        const category = this.listedView().categoryOf.get(c);
+        return category ? [category] : [];
+    }
+
+    inGroup(item, group) {
+        return item._members ? this.channelGroups(item)[0] === group : super.inGroup(item, group);
+    }
+
+    // A genre of All Channels lists its channels in category order, so a home list's hand-picked channels come first.
+    genreChannels(items, genre) {
+        if (items !== this.listedChannels()) return super.genreChannels(items, genre);
+        return this.listedView().byCategory.get(genre) || [];
     }
 
     listedChannels() {
@@ -471,8 +501,7 @@ class ProviderPool extends M3UEPGAddon {
         const all = byId.get('iptv_channels');
         if (all) {
             all.name = 'All Channels';
-            const groups = [...new Set(this.listedChannels().flatMap(c => this.channelGroups(c)))].sort((a, b) => a.localeCompare(b));
-            groups.unshift('All Channels');
+            const groups = ['All Channels', ...this.listedView().byCategory.keys()];
             all.genres = groups;
             const genreExtra = all.extra.find(e => e.name === 'genre');
             if (genreExtra) genreExtra.options = [...groups];
@@ -486,6 +515,12 @@ class ProviderPool extends M3UEPGAddon {
 
     channelById(id) {
         return this.tileById.get(id) || null;
+    }
+
+    generateMetaPreview(item) {
+        const meta = super.generateMetaPreview(item);
+        if (item._members) meta.genres = this.channelGroups(item);
+        return meta;
     }
 
     channelWeight(ch) {
@@ -599,7 +634,10 @@ class ProviderPool extends M3UEPGAddon {
         const tile = this.tileById.get(id);
         if (tile) {
             const meta = super.getDetailedMeta(id);
-            if (meta) meta.description = `${meta.description}\n\n🔌 ${this.sourcesLine(tile)}`;
+            if (meta) {
+                meta.description = `${meta.description}\n\n🔌 ${this.sourcesLine(tile)}`;
+                meta.genres = this.channelGroups(tile);
+            }
             return meta;
         }
         const r = this.route(id);

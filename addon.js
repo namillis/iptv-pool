@@ -368,6 +368,11 @@ class M3UEPGAddon {
         return this.channelGroup(item) === group;
     }
 
+    // [items] in the [genre] a catalog request picked.
+    genreChannels(items, genre) {
+        return items.filter(i => this.inGroup(i, genre));
+    }
+
     searchText(item) {
         return item.name.toLowerCase();
     }
@@ -1479,7 +1484,7 @@ function buildInterface(addonInstance, manifest) {
             
             // If specific genre selected
             if (extra.genre && extra.genre !== 'All Channels') {
-                filtered = filtered.filter(i => addonInstance.inGroup(i, extra.genre));
+                filtered = addonInstance.genreChannels(filtered, extra.genre);
             }
             
             // If searching

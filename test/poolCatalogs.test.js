@@ -123,3 +123,20 @@ test("a channel's description says what Auto does, with no provider list or catc
   p.stremioRelay = fakeRelay(false);
   assert.match(p.getDetailedMeta(cnn.id).description, /🔌 1 stream from 1 provider$/);
 });
+
+test("All Channels' genres are the Xtream login's categories, in the same order with the same channels", async () => {
+  const { buildView } = require("../xtream/api");
+  const { XtreamIds } = require("../xtream/ids");
+  const { p, manifest } = await pool(["US", "UK"]);
+  const view = buildView(p, new XtreamIds(null), ["UK", "US"]);
+  const all = manifest.catalogs.find((c) => c.id === "iptv_channels");
+  assert.deepStrictEqual(all.genres, ["All Channels", ...view.categoryList.map((c) => c.category_name)]);
+  const byStreamId = new Map(view.entries.map((e) => [e.stream.stream_id, e.tile]));
+  for (const c of view.categoryList) {
+    const xtream = view.streamList.filter((s) => s.category_id === c.category_id).map((s) => byStreamId.get(s.stream_id)._key);
+    assert.deepStrictEqual(p.genreChannels(p.listedChannels(), c.category_name).map((t) => t._key), xtream, c.category_name);
+  }
+  const cnn = p.channels.find((t) => t._key === "US|CNN");
+  assert.deepStrictEqual(p.generateMetaPreview(cnn).genres, ["News"]);
+  assert.deepStrictEqual(p.genreChannels(p.listedChannels(), "UK | News").map((t) => t._key), ["UK|BBCNEWS"]);
+});
