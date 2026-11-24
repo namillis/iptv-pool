@@ -1,3 +1,5 @@
+const { cleanName } = require("../channelMerge");
+
 const LEASE_MS = 4 * 3600 * 1000;
 const REPEAT_MS = 60 * 1000;
 const FAILED_MS = 2 * 60 * 1000;
@@ -218,7 +220,7 @@ class Playback {
       return {
         source: sourceKey(m),
         provider: nameOf(m._pid),
-        name: String(m.name || "").trim(),
+        name: cleanName(m.name),
         quality: label.replace(/\s*backup$/i, "").replace(/^Backup$/, ""),
         backup: /backup/i.test(label),
         current: !!lease && lease.key === memberKey(m),

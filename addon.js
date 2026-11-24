@@ -1079,7 +1079,8 @@ class M3UEPGAddon {
     }
 
     generateMetaPreview(item) {
-        const meta = { id: item.id, type: item.type, name: item.name };
+        // A pool channel's label is its name without the provider's country tag ("US| ").
+        const meta = { id: item.id, type: item.type, name: item.label || item.name };
         if (item.type === 'tv') {
             const epgId = this.epgIdOf(item);
             const current = this.getCurrentProgram(epgId);
@@ -1268,7 +1269,7 @@ class M3UEPGAddon {
             const epgId = this.epgIdOf(item);
             const current = this.getCurrentProgram(epgId);
             const upcoming = this.getUpcomingPrograms(epgId, 3);
-            let description = `📺 CHANNEL: ${item.name}`;
+            let description = `📺 CHANNEL: ${item.label || item.name}`;
             if (current) {
                 const start = (current.startTime ? this.formatTime(current.startTime) : '') || '';
                 const end = (current.stopTime ? this.formatTime(current.stopTime) : '') || '';
@@ -1288,7 +1289,7 @@ class M3UEPGAddon {
             return {
                 id: item.id,
                 type: 'tv',
-                name: item.name,
+                name: item.label || item.name,
                 poster: this.deriveFallbackLogoUrl(item),
                 posterShape: 'landscape',
                 description,

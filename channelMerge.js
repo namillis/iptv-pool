@@ -10,6 +10,10 @@ const GENERIC_TAIL_RE = /\s+(?:TV|CHANNEL)\s*$/;
 const NETWORK_RE = /\b(ABC|CBS|NBC|FOX|PBS|CW|ION|METV|TELEMUNDO|UNIVISION|UNIMAS|MY(?:NETWORK)?(?:TV)?|IND(?:EPENDENT)?)\b/;
 const CALL_PAREN_RE = /\(([KW][A-Z]{2,3})(?:-(?:TV|DT\d?|LD|CD\d?))?\)/;
 const CALL_BARE_RE = /\b([KW][A-Z]{3})(?:-(?:TV|DT|LD|CD)|\s+TV)\s*$/;
+// "NBC (WRCDT WASHINGTON" and "FOX (WTTG - WASHINGTON D.C.)", with no ")" after the call sign, and
+// "NC | WASHINGTON | NBC WITN", with the call sign after the network at the end.
+const CALL_OPEN_RE = /\(([KW][A-Z]{2,3}?)(?:DT\d?)?(?:\s*-|\s+[A-Z])/;
+const NET_CALL_END_RE = /\b(?:ABC|CBS|NBC|FOX|PBS|CW|TELEMUNDO|UNIVISION|UNIMAS)\s+([KW][A-Z]{2,3})\s*$/;
 const CALL_STOPWORDS = new Set(['WEST', 'WEEK', 'WILD', 'WIRE', 'WORK', 'WORLD', 'KIDS', 'KING', 'WOMEN', 'WOW', 'WWE']);
 const CATEGORY_US_RE = /(?:^|[^A-Z])(?:USA|US|UNITED STATES)(?![A-Z])/;
 const CATEGORY_UK_RE = /(?:^|[^A-Z])(?:UK|GB|UNITED KINGDOM|GREAT BRITAIN|GRAN BRETAÑA|ENGLAND|SCOTLAND|WALES|BRITISH)(?![A-Z])/;
@@ -104,7 +108,7 @@ function stationKey(text) {
     const paren = text.match(CALL_PAREN_RE);
     if (paren && !CALL_STOPWORDS.has(paren[1])) call = paren[1];
     if (!call && net) {
-        const bare = text.match(CALL_BARE_RE);
+        const bare = text.match(CALL_BARE_RE) || text.match(CALL_OPEN_RE) || text.match(NET_CALL_END_RE);
         if (bare && !CALL_STOPWORDS.has(bare[1])) call = bare[1];
     }
     if (!call) return null;
@@ -139,7 +143,9 @@ function channelKey(name, defaultCountry = '') {
 }
 
 function rawChannelKey(name, defaultCountry) {
-    const { prefix, rest: text } = splitPrefix(prepare(name));
+    const prepared = prepare(name);
+    const tag = splitFeedTag(prepared);
+    const { prefix, rest: text } = tag ? { prefix: tag.country, rest: tag.rest } : splitPrefix(prepared);
     let country = prefix;
     let rest = text;
     if (!prefix && defaultCountry && !SEPARATOR_RE.test(text)) {
@@ -183,6 +189,55 @@ function displayName(name) {
     return stripped.length >= 2 ? stripped : text;
 }
 
+// Country and feed tags providers put in front of a name ("US| ", "USA: ", "| UK | ", "[UK] ", "USA**:", "AT&T: ",
+// "USA Latino | "). A tag needs its separator, so "USA Network" and "UK Gold" keep their country word.
+const COUNTRY_TAG_RE = /^\s*[|[(┃]?\s*(?:US|USA|UK|GB)\s*[|\]):\-–•┃]+\s*/i;
+// Tags that name a feed or a package rather than a country, with the country they stand for. The merge keys a
+// tagged name by its country and the rest, so "AT&T: CNN" joins "USA: CNN" instead of being a second CNN.
+const FEED_TAGS = [
+    [/^\s*AT&T\s*:\s*/i, 'US'],
+    [/^\s*USA (?:LATINO|LATINA|KIDS)\s*\|\s*/i, 'US'],
+    [/^\s*USA\*\*\s*:\s*/i, 'US'],
+    [/^\s*US_HD\s*:\s*/i, 'US'],
+    [/^\s*\(US LOC\)\s*/i, 'US'],
+    [/^\s*ASIA-US\s*\|\s*/i, 'US'],
+    [/^\s*VIP UK\s*:\s*/i, 'UK']
+];
+const NAME_TAG_RES = [COUNTRY_TAG_RE, ...FEED_TAGS.map(([re]) => re), /^\s*US\s+(?=\()/];
+
+/** [text] without a feed tag in front, and the tag's country, or null when it has none. */
+function splitFeedTag(text) {
+    for (const [re, country] of FEED_TAGS) {
+        const m = text.match(re);
+        if (m) return { country, rest: text.slice(m[0].length) };
+    }
+    return null;
+}
+
+/**
+ * [name] with a feed tag written as its country ("AT&T: CNN" is "US: CNN"), the form event matching reads to tell
+ * a US channel.
+ */
+function countryTagged(name) {
+    const tag = splitFeedTag(String(name || ''));
+    return tag ? `${tag.country}: ${tag.rest}` : name;
+}
+
+/**
+ * A name as people see it, without the tags in front. Only names shown in the apps go through this: the pool's
+ * keys and its event matching read the provider's full name, which says which country a channel is from.
+ */
+function cleanName(name) {
+    const text = String(name || '').trim();
+    let out = text;
+    for (let i = 0; i < 3; i++) {
+        const next = NAME_TAG_RES.reduce((t, re) => t.replace(re, ''), out);
+        if (next === out) break;
+        out = next;
+    }
+    return out.length >= 2 ? out : text;
+}
+
 function tileId(key) {
     return 'iptv_ch_' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16);
 }
@@ -213,4 +268,4 @@ function groupByKey(members, keyOf) {
     return [...byKey.values()];
 }
 
-module.exports = { channelKey, categoryCountry, streamQuality, displayName, tileId, groupByKey, KEY_ALIASES };
+module.exports = { channelKey, categoryCountry, streamQuality, displayName, cleanName, countryTagged, tileId, groupByKey, KEY_ALIASES };
