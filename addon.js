@@ -559,16 +559,23 @@ class M3UEPGAddon {
         const headline = e.status === 'in' && e.statusDetail
             ? `🔴 Live · ${e.statusDetail}`
             : (live ? `🔴 Live now · started ${when}` : `⏰ Starts ${when}`);
+        const genres = this.eventGenres(e);
+        const about = [...new Set([e.sport || e.league, e.network, ...genres].filter(Boolean))];
         return {
             id: e.id,
             type: 'tv',
             name: e.title,
             poster: this.eventPosterUrl(e),
             posterShape: 'landscape',
-            description: `${headline}\n${[e.sport || e.league, e.network].filter(Boolean).map(s => s + ' · ').join('')}${e.sources.join(' · ')} · ${count} channel${count === 1 ? '' : 's'}`,
-            genres: e.sources,
+            description: `${headline}\n${about.map(s => s + ' · ').join('')}${count} channel${count === 1 ? '' : 's'}`,
+            genres,
             runtime: live ? 'Live' : when
         };
+    }
+
+    // An event's genres are the provider groups of the channels carrying it.
+    eventGenres(e) {
+        return e.sources;
     }
 
     channelById(id) {
