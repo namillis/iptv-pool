@@ -4,6 +4,8 @@ const { categoryCountry, displayName, tileId } = require('./channelMerge');
 const { TILE_HEADER } = require('./mergePlan');
 const { MergeWorker, InlinePlanner } = require('./mergeWorker');
 const { fetchAccountInfo } = require('./src/js/providers/xtreamProvider');
+const { HOME, tileCountry } = require('./xtream/api');
+const { categoryFor } = require('./xtream/categories');
 
 const SEP = '~';
 const ID_RE = /^[a-z0-9]{1,8}$/;
@@ -19,6 +21,12 @@ const POOL_ADDON_NAME = 'M3U/EPG TV Pool';
 const COUNTRY_RE = /^[A-Z]{2,3}$/;
 const TILE_PREFIX = 'iptv_ch_';
 const ACCOUNT_CACHE_MS = 5 * 60 * 1000;
+// The home lists (xtream/home.json) that get their own Stremio catalog, in catalog order after Live Sports and Popular on TV.
+const HOME_CATALOGS = ['Local DC', 'News', 'Entertainment', 'Movies'];
+const HOME_CATALOG_PREFIX = 'iptv_home_';
+for (const name of HOME_CATALOGS)
+    if (!HOME.categories.some(c => c.name === name)) throw new Error(`xtream/home.json has no "${name}" category`);
+const homeCatalogId = (name) => HOME_CATALOG_PREFIX + name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
 
 function loadPoolConfig(file) {
     let raw;
@@ -27,7 +35,11 @@ function loadPoolConfig(file) {
     } catch (e) {
         throw new Error(`Cannot read ${file}: ${e.code || e.message}`);
     }
-    const settings = { enableEpg: true, ...(raw.settings || {}) };
+    const { countries: rawCountries, ...childSettings } = { enableEpg: true, ...(raw.settings || {}) };
+    if (rawCountries !== undefined && !Array.isArray(rawCountries)) throw new Error('"settings.countries" must be a list like ["US", "UK"]');
+    const countries = (rawCountries || []).map(c => String(c).toUpperCase());
+    for (const c of countries) if (!COUNTRY_RE.test(c)) throw new Error(`"settings.countries" has an invalid country "${c}"`);
+    const settings = { ...childSettings, countries };
     if (!Array.isArray(raw.providers) || !raw.providers.length)
         throw new Error('"providers" must be a non-empty list');
     if (raw.providers.length > MAX_PROVIDERS)
@@ -44,7 +56,7 @@ function loadPoolConfig(file) {
         const { id: _id, name, country: rawCountry, ...fields } = p;
         const country = rawCountry ? String(rawCountry).toUpperCase() : '';
         if (country && !COUNTRY_RE.test(country)) throw new Error(`Provider "${id}" country must be a 2-3 letter code like US`);
-        const config = { ...settings, ...fields };
+        const config = { ...childSettings, ...fields };
         config.provider = config.provider || (config.xtreamUrl ? 'xtream' : 'direct');
         if (config.provider === 'xtream') {
             for (const k of ['xtreamUrl', 'xtreamUsername', 'xtreamPassword'])
@@ -80,6 +92,11 @@ class ProviderPool extends M3UEPGAddon {
         // The merge plans in a worker thread unless [inlineMerge] (tests) or the worker has failed.
         this.planner = poolConfig.inlineMerge ? new InlinePlanner() : null;
         this.accounts = null;
+        // The countries the Stremio catalogs show (settings.countries), or null for all of them. Xtream logins pick
+        // their own countries.
+        const countries = poolConfig.settings.countries || [];
+        this.countries = countries.length ? new Set(countries) : null;
+        this.listed = null;
     }
 
     async loadFromCache() {
@@ -376,6 +393,78 @@ class ProviderPool extends M3UEPGAddon {
         return !!child && child.catchupEnabledFor(item);
     }
 
+    tileListed(tile) {
+        return !!tile && (!this.countries || this.countries.has(tileCountry(tile._key)));
+    }
+
+    /**
+     * The channels in the pool's countries, and the home lists built from them the way an Xtream login's are: each
+     * list's hand-picked channels in home.json order, then every other home-country channel filed under the same
+     * category name. Built once per merge.
+     */
+    listedView() {
+        if (this.listed && this.listed.channels === this.channels) return this.listed;
+        const channels = this.countries ? this.channels.filter(t => this.tileListed(t)) : this.channels;
+        const curated = !this.countries || this.countries.has(HOME.country);
+        const lists = new Map(HOME_CATALOGS.map(name => [name, { picked: [], rest: [] }]));
+        const byIndex = HOME.categories.map(c => lists.get(c.name) || null);
+        for (const tile of channels) {
+            const slot = curated && HOME.slots.get(tile._key);
+            if (slot) {
+                if (byIndex[slot.category]) byIndex[slot.category].picked[slot.rank] = tile;
+                continue;
+            }
+            if (tileCountry(tile._key) !== HOME.country) continue;
+            const list = lists.get(categoryFor(tile._groups, tile.name, true));
+            if (list) list.rest.push(tile);
+        }
+        const home = new Map([...lists].map(([name, l]) => [homeCatalogId(name), [...l.picked.filter(Boolean), ...l.rest]]));
+        this.listed = { channels: this.channels, listed: channels, home };
+        return this.listed;
+    }
+
+    listedChannels() {
+        return this.listedView().listed;
+    }
+
+    homeChannels(catalogId) {
+        return this.listedView().home.get(catalogId) || [];
+    }
+
+    listedEvent(e) {
+        if (!e || !this.countries) return e || null;
+        const channels = e.channels.filter(ch => this.tileListed(this.tileById.get(ch.id)));
+        return channels.length ? { ...e, channels } : null;
+    }
+
+    // Stremio and Nuvio only play what's on now, so the pool has no Catch-up TV catalog.
+    buildCatchupCatalog() { }
+
+    /**
+     * The pool's Stremio TV catalogs, in order: Live Sports, Popular on TV, the HOME_CATALOGS lists and All Channels,
+     * all limited to the pool's countries. Today and the provider group catalogs are left out.
+     */
+    buildGenresInManifest() {
+        super.buildGenresInManifest();
+        if (!this.manifestRef || !this.manifestReady) return;
+        const catalogs = this.manifestRef.catalogs;
+        const byId = new Map(catalogs.map(c => [c.id, c]));
+        const all = byId.get('iptv_channels');
+        if (all) {
+            all.name = 'All Channels';
+            const groups = [...new Set(this.listedChannels().flatMap(c => this.channelGroups(c)))].sort((a, b) => a.localeCompare(b));
+            groups.unshift('All Channels');
+            all.genres = groups;
+            const genreExtra = all.extra.find(e => e.name === 'genre');
+            if (genreExtra) genreExtra.options = [...groups];
+        }
+        const home = HOME_CATALOGS
+            .filter(name => this.homeChannels(homeCatalogId(name)).length)
+            .map(name => ({ type: 'tv', id: homeCatalogId(name), name, extra: [{ name: 'search' }, { name: 'skip' }] }));
+        const tv = [byId.get('iptv_live_now'), byId.get('iptv_popular_tv'), ...home, all].filter(Boolean);
+        catalogs.splice(0, catalogs.length, ...tv, ...catalogs.filter(c => c.type !== 'tv'));
+    }
+
     providerSummary(tile, max = 3) {
         const names = tile._primary.map(m => this.childById.get(m._pid).poolName);
         return names.length > max ? `${names.slice(0, max).join(', ')} +${names.length - max}` : names.join(', ');
@@ -435,7 +524,7 @@ class ProviderPool extends M3UEPGAddon {
 
     // Each channel once first, so the cap isn't spent on copies of a few channels, then backups from other providers.
     getEventStreams(id) {
-        const e = this.liveEventIndex().get(id);
+        const e = this.listedEvent(this.liveEventIndex().get(id));
         if (!e) return [];
         const lists = [];
         for (const ch of this.eventChannels(e)) {

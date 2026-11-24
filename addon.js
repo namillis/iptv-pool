@@ -372,6 +372,21 @@ class M3UEPGAddon {
         return item.name.toLowerCase();
     }
 
+    // The channels the All Channels catalog lists. The pool narrows them to its countries.
+    listedChannels() {
+        return this.channels;
+    }
+
+    // The channels of a curated catalog ('iptv_home_...'). Only the pool has them.
+    homeChannels(catalogId) {
+        return [];
+    }
+
+    // [e] as the catalogs show it, or null to leave it out. The pool drops channels outside its countries.
+    listedEvent(e) {
+        return e || null;
+    }
+
     buildGroupCatalogs(tvCatalog) {
         const catalogs = this.manifestRef.catalogs;
         for (let i = catalogs.length - 1; i >= 0; i--) {
@@ -646,7 +661,7 @@ class M3UEPGAddon {
     }
 
     getEventMeta(id) {
-        const e = this.liveEventIndex().get(id);
+        const e = this.listedEvent(this.liveEventIndex().get(id));
         if (!e) return null;
         const meta = this.eventMetaPreview(e);
         const ranked = this.rankedEventChannels(e);
@@ -657,7 +672,7 @@ class M3UEPGAddon {
     }
 
     getEventStreams(id) {
-        const e = this.liveEventIndex().get(id);
+        const e = this.listedEvent(this.liveEventIndex().get(id));
         if (!e) return [];
         const streams = [];
         for (const ch of this.eventChannels(e)) {
@@ -1430,6 +1445,7 @@ function buildInterface(addonInstance, manifest) {
                     ? todayEvents(index, now, { ...opts, zone: addonInstance.timezone || 'America/New_York' })
                     : currentEvents(index, now, { ...opts, kind: args.id === 'iptv_popular_tv' ? 'tv' : 'sports' });
                 if (q) events = events.filter(e => e.title.toLowerCase().includes(q));
+                events = events.map(e => addonInstance.listedEvent(e)).filter(Boolean);
                 const skip = extra.skip ? parseInt(extra.skip) : 0;
                 const metas = events.slice(skip, skip + 100).map(e => addonInstance.eventMetaPreview(e, now));
                 return { metas, cacheMaxAge: LIVE_NOW_CACHE_S };
@@ -1437,7 +1453,9 @@ function buildInterface(addonInstance, manifest) {
 
             let items = [];
             if (args.type === 'tv' && args.id === 'iptv_channels') {
-                items = addonInstance.channels;
+                items = addonInstance.listedChannels();
+            } else if (args.type === 'tv' && args.id.startsWith('iptv_home_')) {
+                items = addonInstance.homeChannels(args.id);
             } else if (args.type === 'tv' && args.id === 'iptv_catchup') {
                 items = addonInstance.channels.filter(c => addonInstance.catchupEnabledFor(c));
             } else if (args.type === 'tv' && args.id.startsWith('iptv_grp_')) {
