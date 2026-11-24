@@ -421,6 +421,7 @@ app.use("/:token", async (req, res, next) => {
     }
     req.configToken = token;
     setPublicBase(req, req.addonInterface, token);
+    req.addonInterface.pool.stremioRelay = xtreamRouter ? xtreamRouter.stremio : null;
     return next();
   }
   if (!isConfigToken(token)) return next("route");
@@ -574,6 +575,22 @@ app.get("/:token/metrics", (req, res) => {
   } catch (e) {
     console.error("[METRICS] Summary failed:", e.message);
     res.status(500).json({ error: "Metrics failed" });
+  }
+});
+
+// A pool channel played through the stream relay: the first of its Stremio streams.
+const PLAY_FILE_RE = /^(iptv_ch_[0-9a-f]{16})\.ts$/;
+app.get("/:token/play/:file", async (req, res) => {
+  const iface = req.addonInterface;
+  const m = PLAY_FILE_RE.exec(req.params.file);
+  const pool = iface && iface.isPool ? iface.pool : null;
+  const tile = pool && m ? pool.tileById.get(m[1]) : null;
+  if (!tile || !pool.tileListed(tile) || !pool.relayPlayable()) return res.status(404).json({ error: "Not found" });
+  try {
+    return await pool.stremioRelay.play(req, res, pool, tile);
+  } catch (e) {
+    console.error("[POOL] Relay play failed:", e.message);
+    if (!res.headersSent) res.status(500).json({ error: "Play failed" });
   }
 });
 

@@ -36,6 +36,8 @@ const ARCHIVE_FILE_RE = /^(\d{1,9})\.(ts|m3u8)$/;
 const DURATION_RE = /^\d{1,4}$/;
 // With the relay failing over by itself, the app's source list only needs the best few.
 const RELAY_SOURCES_SHOWN = 3;
+// The relay login for Stremio and Nuvio: how many channels they play at once, across every device.
+const STREMIO_USER = { username: "stremio", maxConnections: 4, countries: [] };
 const EVENTS_TTL_MS = 60 * 1000;
 const LIVE_NOW_KEY = "\u0000LIVE NOW";
 const POPULAR_TV_KEY = "\u0000POPULAR TV";
@@ -938,6 +940,20 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   router.flush = () => {
     ids.flush();
     archives.flush();
+  };
+
+  /**
+   * Stremio and Nuvio play the pool's channels through the relay as one login, STREMIO_USER, whose connection limit
+   * covers every device using the addon. server.js serves /<pool key>/play/<channel id>.ts with [play].
+   */
+  router.stremio = {
+    enabled: () => !!relay && relay.enabledFor(STREMIO_USER.username),
+    /** A channel's streams in relay order, from the last account check. */
+    order: (pool, tile) => relayOrder(tile, pool.accounts ? pool.accounts.byId : null),
+    play: async (req, res, pool, tile) => {
+      if (overLimit(STREMIO_USER, "stream", STREAMS_PER_MIN)) return tooMany(res);
+      return relayLive(req, res, STREMIO_USER, tile.id, tile, await accountStatus(pool), null);
+    },
   };
 
   /** Records each provider's account and refresh state, and how many streams the pool's logins hold on it. */

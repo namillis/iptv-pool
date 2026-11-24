@@ -3,7 +3,7 @@ const assert = require("node:assert");
 const { baseManifest } = require("../addon");
 const { ProviderPool, loadPoolConfig } = require("../providerPool");
 
-const ch = (id, name, category) => ({ id, name, type: "tv", category, attributes: { "group-title": category } });
+const ch = (id, name, category) => ({ id, name, type: "tv", category, url: `http://a.example/${id}.ts`, attributes: { "group-title": category } });
 
 async function pool(countries) {
   const manifest = baseManifest({ liveOnly: true });
@@ -73,4 +73,35 @@ test("settings.countries must be country codes", () => {
   assert.throws(() => loadPoolConfig(file), /invalid country/);
   write("US");
   assert.throws(() => loadPoolConfig(file), /must be a list/);
+});
+
+const fakeRelay = (enabled = true) => ({ enabled: () => enabled, order: (pool, tile) => [...tile._members].reverse() });
+
+test("with the relay on, a channel's first stream is the relay, then up to 3 direct streams in relay order", async () => {
+  const { p } = await pool(["US"]);
+  p.publicBase = "https://iptv.example/pool-key";
+  const cnn = p.channels.find((t) => t._key === "US|CNN");
+  cnn._members = [...cnn._members, ...cnn._members, ...cnn._members, ...cnn._members];
+  assert.ok(p.getStreams(cnn.id).every((s) => !s.url.includes("/play/")), "no hook, no relay");
+  p.stremioRelay = fakeRelay();
+  const streams = p.getStreams(cnn.id);
+  assert.strictEqual(streams[0].url, `https://iptv.example/pool-key/play/${cnn.id}.ts`);
+  assert.strictEqual(streams[0].name, "Auto");
+  assert.strictEqual(streams.length, 4);
+  assert.ok(streams.slice(1).every((s) => s.url === "http://a.example/1.ts"));
+  p.stremioRelay = fakeRelay(false);
+  assert.ok(!p.getStreams(cnn.id)[0].url.includes("/play/"), "relay down, direct streams");
+});
+
+test("with the relay on, an event lists one relay stream per channel, then up to 3 direct streams", async () => {
+  const { p } = await pool(["US"]);
+  p.publicBase = "https://iptv.example/pool-key";
+  p.stremioRelay = fakeRelay();
+  const tile = (key) => p.channels.find((t) => t._key === key);
+  const e = { id: "iptv_ev_1", channels: [{ id: tile("US|CNN").id, source: "CNN", slot: "CNN" }, { id: tile("US|FOXNEWS").id, source: "Fox News", slot: "Fox News" }] };
+  p.liveEventIndex = () => new Map([[e.id, e]]);
+  p.eventChannels = (ev) => ev.channels;
+  const streams = p.getEventStreams(e.id);
+  assert.deepStrictEqual(streams.slice(0, 2).map((s) => s.url), [`https://iptv.example/pool-key/play/${tile("US|CNN").id}.ts`, `https://iptv.example/pool-key/play/${tile("US|FOXNEWS").id}.ts`]);
+  assert.deepStrictEqual(streams.slice(2).map((s) => s.url), ["http://a.example/1.ts", "http://a.example/2.ts"]);
 });

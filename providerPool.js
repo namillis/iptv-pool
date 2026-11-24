@@ -27,6 +27,8 @@ const HOME_CATALOG_PREFIX = 'iptv_home_';
 for (const name of HOME_CATALOGS)
     if (!HOME.categories.some(c => c.name === name)) throw new Error(`xtream/home.json has no "${name}" category`);
 const homeCatalogId = (name) => HOME_CATALOG_PREFIX + name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+// Direct streams listed under a relayed one, for picking a source by hand.
+const RELAY_FALLBACKS = 3;
 
 function loadPoolConfig(file) {
     let raw;
@@ -97,6 +99,7 @@ class ProviderPool extends M3UEPGAddon {
         const countries = poolConfig.settings.countries || [];
         this.countries = countries.length ? new Set(countries) : null;
         this.listed = null;
+        this.stremioRelay = null;
     }
 
     async loadFromCache() {
@@ -497,13 +500,29 @@ class ProviderPool extends M3UEPGAddon {
             const stream = this.getStream(id);
             return stream ? [stream] : [];
         }
+        if (!this.relayPlayable()) return this.directStreams(tile._members);
+        return [this.relayStream(tile, 'Auto', tile.name), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
+    }
+
+    directStreams(members) {
         const streams = [];
-        for (const m of tile._members) {
+        for (const m of members) {
             const label = m._quality.label;
             const s = this.memberStream(m, label ? `${this.childById.get(m._pid).poolName}\n${label}` : this.childById.get(m._pid).poolName);
             if (s) streams.push(s);
         }
         return streams;
+    }
+
+    // Stremio and Nuvio play channels through the stream relay when server.js has given the pool its hook
+    // (stremioRelay, from the Xtream router) and a request has set the public base for the play URL.
+    relayPlayable() {
+        return !!this.stremioRelay && !!this.publicBase && this.stremioRelay.enabled();
+    }
+
+    // The relay races the channel's sources and switches to another mid-show if one stalls.
+    relayStream(tile, name, title) {
+        return { name, title: `${title}\nSwitches sources by itself`, url: `${this.publicBase}/play/${tile.id}.ts`, behaviorHints: { notWebReady: true } };
     }
 
     getStream(id) {
@@ -522,15 +541,19 @@ class ProviderPool extends M3UEPGAddon {
         return streams.map(s => ({ ...s, name: `${child.poolName}\n${s.name}` }));
     }
 
-    // Each channel once first, so the cap isn't spent on copies of a few channels, then backups from other providers.
+    // Through the relay, one stream per channel, then the first few direct streams as a manual fallback. Direct
+    // streams take each channel once first, so the cap isn't spent on copies of a few channels, then backups from
+    // other providers.
     getEventStreams(id) {
         const e = this.listedEvent(this.liveEventIndex().get(id));
         if (!e) return [];
         const lists = [];
         for (const ch of this.eventChannels(e)) {
             const tile = this.tileById.get(ch.id);
-            if (tile) lists.push({ ch, members: [...tile._primary] });
+            if (tile) lists.push({ ch, tile, members: [...tile._primary] });
         }
+        const relayed = this.relayPlayable() ? lists.map(l => this.relayStream(l.tile, `Auto\n${l.ch.source}`, l.ch.slot)) : [];
+        const max = relayed.length ? RELAY_FALLBACKS : EVENT_STREAMS_MAX;
         const streams = [];
         const take = ({ ch, members }) => {
             while (members.length) {
@@ -543,16 +566,16 @@ class ProviderPool extends M3UEPGAddon {
             }
         };
         for (const l of lists) {
-            if (streams.length >= EVENT_STREAMS_MAX) return streams;
+            if (streams.length >= max) break;
             take(l);
         }
-        while (streams.length < EVENT_STREAMS_MAX && lists.some(l => l.members.length)) {
+        while (streams.length < max && lists.some(l => l.members.length)) {
             for (const l of lists) {
-                if (streams.length >= EVENT_STREAMS_MAX) break;
+                if (streams.length >= max) break;
                 take(l);
             }
         }
-        return streams;
+        return [...relayed, ...streams];
     }
 
     eventChannelLabel(ch) {
