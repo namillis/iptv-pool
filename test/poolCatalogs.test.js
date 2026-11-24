@@ -189,3 +189,21 @@ test("Live Sports and Popular on TV events have their sport or TV category as ge
   assert.ok(!liveSports.genres.includes("USA VIP"));
   assert.deepStrictEqual(liveSports.extra.find((e) => e.name === "genre").options, liveSports.genres);
 });
+
+test("an event's page says what Auto does instead of listing its channels, and its streams are named like a channel's", async () => {
+  const { p } = await pool(["US"]);
+  p.publicBase = "https://iptv.example/pool-key";
+  p.stremioRelay = fakeRelay();
+  const tile = (key) => p.channels.find((t) => t._key === key);
+  const now = Date.now();
+  const e = { id: "iptv_ev_1", title: "Election Night", start: now, end: now + 3600000, category: "TV", sources: ["USA VIP"],
+    channels: [{ id: tile("US|CNN").id, source: "USA VIP", slot: "US: CNN" }, { id: tile("US|FOXNEWS").id, source: "USA VIP", slot: "USA: FOX NEWS" }] };
+  p.liveEventIndex = () => new Map([[e.id, e]]);
+  p.eventChannels = (ev) => ev.channels;
+  const { description } = p.getEventMeta(e.id);
+  assert.doesNotMatch(description, /•|and \d+ more/);
+  assert.match(description, /Each Auto stream is one of these channels/);
+  const streams = p.getEventStreams(e.id);
+  assert.deepStrictEqual(streams.slice(0, 2).map((s) => [s.name, s.title.split("\n")[0]]), [["Auto", "CNN"], ["Auto", "FOX NEWS"]]);
+  assert.ok(streams.slice(2).every((s) => s.name === "a"), "backups are named by provider (and quality), not the provider's group");
+});

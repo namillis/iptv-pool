@@ -575,11 +575,16 @@ class ProviderPool extends M3UEPGAddon {
     directStreams(members) {
         const streams = [];
         for (const m of members) {
-            const label = m._quality.label;
-            const s = this.memberStream(m, label ? `${this.childById.get(m._pid).poolName}\n${label}` : this.childById.get(m._pid).poolName);
+            const s = this.memberStream(m, this.memberLabel(m));
             if (s) streams.push(s);
         }
         return streams;
+    }
+
+    // A direct stream's name: its provider, and its quality when it has one ("Raptor\nHD").
+    memberLabel(m) {
+        const provider = this.childById.get(m._pid).poolName;
+        return m._quality.label ? `${provider}\n${m._quality.label}` : provider;
     }
 
     // Stremio and Nuvio play channels through the stream relay when server.js has given the pool its hook
@@ -629,13 +634,15 @@ class ProviderPool extends M3UEPGAddon {
             const tile = this.tileById.get(ch.id);
             if (tile) lists.push({ ch, tile, members: [...tile._primary] });
         }
-        const relayed = this.relayPlayable() ? lists.map(l => this.relayStream(l.tile, `Auto\n${l.ch.source}`, cleanName(l.ch.slot))) : [];
+        const relayed = this.relayPlayable()
+            ? lists.map(l => this.relayStream(l.tile, autoStreamName(l.tile), cleanName(l.ch.slot), this.nowShowing(l.tile)))
+            : [];
         const max = relayed.length ? RELAY_FALLBACKS : EVENT_STREAMS_MAX;
         const streams = [];
-        const take = ({ ch, members }) => {
+        const take = ({ members }) => {
             while (members.length) {
                 const m = members.shift();
-                const s = this.memberStream(m, `${this.childById.get(m._pid).poolName}\n${ch.source}`);
+                const s = this.memberStream(m, this.memberLabel(m));
                 if (s) {
                     streams.push(s);
                     return;
@@ -655,8 +662,14 @@ class ProviderPool extends M3UEPGAddon {
         return [...relayed, ...streams];
     }
 
-    eventChannelLabel(ch) {
-        return cleanName(ch.slot);
+    // An event's page says what Auto does in place of listing every channel; its streams are the channels.
+    getEventMeta(id) {
+        const e = this.listedEvent(this.liveEventIndex().get(id));
+        if (!e) return null;
+        const meta = this.eventMetaPreview(e);
+        if (this.relayPlayable())
+            meta.description += '\n\n🔌 Each Auto stream is one of these channels. It plays that channel\'s best stream and switches if one stalls. The streams under them are backups to pick by hand.';
+        return meta;
     }
 
     getDetailedMeta(id) {
