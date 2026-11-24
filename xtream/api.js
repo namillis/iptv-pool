@@ -994,4 +994,4 @@ function createXtreamRouter({ usersFile, idsFile, archiveFile = null, metrics = 
   return router;
 }
 
-module.exports = { createXtreamRouter, loadUsers, loadHome, buildView, buildViewSliced, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape };
+module.exports = { createXtreamRouter, loadUsers, loadHome, HOME, buildView, buildViewSliced, buildGuide, guideWindow, tileCountry, xmltvTime, xmlEscape };
