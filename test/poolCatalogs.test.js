@@ -87,6 +87,9 @@ test("with the relay on, a channel's first stream is the relay, then up to 3 dir
   const streams = p.getStreams(cnn.id);
   assert.strictEqual(streams[0].url, `https://iptv.example/pool-key/play/${cnn.id}.ts`);
   assert.strictEqual(streams[0].name, "Auto");
+  cnn._members = [{ ...cnn._members[0], _quality: { label: "HD", rank: 0 } }, { ...cnn._members[0], _quality: { label: "FHD backup", rank: 0.5 } }];
+  assert.strictEqual(p.getStreams(cnn.id)[0].name, "Auto\nFHD", "Auto carries the best resolution among the channel's streams");
+  cnn._members = [...Array(4)].map(() => ({ ...cnn._members[0], _quality: { label: "", rank: 1 } }));
   assert.strictEqual(streams.length, 4);
   assert.ok(streams.slice(1).every((s) => s.url === "http://a.example/1.ts"));
   p.stremioRelay = fakeRelay(false);

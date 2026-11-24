@@ -29,6 +29,14 @@ for (const name of HOME_CATALOGS)
 const homeCatalogId = (name) => HOME_CATALOG_PREFIX + name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
 // Direct streams listed under a relayed one, for picking a source by hand.
 const RELAY_FALLBACKS = 3;
+// Nuvio on Apple TV hides a stream with no quality in its name when others have one, so Auto carries the best
+// resolution among the channel's streams, as the others do ("Raptor\nHD").
+const AUTO_QUALITIES = ['UHD', 'FHD', 'HD', 'SD'];
+function autoStreamName(tile) {
+    const labels = new Set(tile._members.map(m => (m._quality ? m._quality.label : '').replace(/\s*backup$/i, '')));
+    const best = AUTO_QUALITIES.find(q => labels.has(q));
+    return best ? `Auto\n${best}` : 'Auto';
+}
 
 function loadPoolConfig(file) {
     let raw;
@@ -490,7 +498,7 @@ class ProviderPool extends M3UEPGAddon {
             return stream ? [stream] : [];
         }
         if (!this.relayPlayable()) return this.directStreams(tile._members);
-        return [this.relayStream(tile, 'Auto', tile.name), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
+        return [this.relayStream(tile, autoStreamName(tile), tile.name), ...this.directStreams(this.stremioRelay.order(this, tile).slice(0, RELAY_FALLBACKS))];
     }
 
     directStreams(members) {
